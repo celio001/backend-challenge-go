@@ -13,6 +13,8 @@ var (
 	ErrInvalidTimestamp  = errors.New("wallet: invalid timestamp")
 	ErrInsufficientFunds = errors.New("wallet: insufficient funds")
 	ErrNegativeBalance   = errors.New("wallet: balance cannot be negative")
+	ErrAlreadyExists     = errors.New("wallet: player already has a wallet in this currency")
+	ErrNotFound          = errors.New("wallet: not found")
 )
 
 type (
