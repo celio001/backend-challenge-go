@@ -52,12 +52,26 @@ type OutboxWriter interface {
 	Add(ctx context.Context, e OutboxEvent) error
 }
 
+type InboxMessage struct {
+	Consumer   string
+	MessageID  string
+	Hash       []byte
+	ReceivedAt time.Time
+}
+
+type InboxRepository interface {
+	// Register records the message as handled by this unit of work. It reports duplicate when the message was already handled
+	// with the same hash, and returns ErrInboxHashMismatch when the id was seen with different content.
+	Register(ctx context.Context, m InboxMessage) (duplicate bool, err error)
+}
+
 // Repos is only valid inside UnitOfWork.Do: every repository shares the same SQL transaction.
 type Repos interface {
 	Wallets() WalletRepository
 	Transactions() TransactionRepository
 	Ledger() LedgerRepository
 	Outbox() OutboxWriter
+	Inbox() InboxRepository
 }
 
 // Do commits when fn returns nil and rolls back otherwise.
