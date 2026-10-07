@@ -264,7 +264,9 @@ func (c *Consumer) processOne(work context.Context, m types.Message) Action {
 	stopBeat := c.heartbeat(m)
 	v := c.handler.Handle(ctx, msg)
 	stopBeat()
-	endMessageSpan(span, v)
+	// The span covers settling the message too, and reports Retry when a dead letter could not be written.
+	outcome := v
+	defer func() { endMessageSpan(span, outcome) }()
 	if v.Action != Retry {
 		// The outcome is durable (or final) but the message is still on the queue: the worst moment to die.
 		faultinject.Hit("after_commit_before_sqs_delete")
@@ -289,6 +291,7 @@ func (c *Consumer) processOne(work context.Context, m types.Message) Action {
 		if err := c.deadLetter(settle, m, v.Code); err != nil {
 			log.Error("dead-letter message", "error", err)
 			c.observe(OutcomeDeadLetterFailed)
+			outcome.Action, outcome.Err = Retry, err
 			return Retry
 		}
 		c.observe(OutcomeDeadLettered)
