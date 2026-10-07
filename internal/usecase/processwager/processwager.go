@@ -21,6 +21,7 @@ import (
 const (
 	maxTextLen          = 255
 	pendingFirstAttempt = time.Second
+	pendingMaxDelay     = time.Minute
 )
 
 type Input struct {
@@ -74,6 +75,14 @@ func New(uow usecase.UnitOfWork, clock usecase.Clock, ids usecase.IDGenerator, o
 		opts.RetryBase = 50 * time.Millisecond
 	}
 	return &UseCase{uow: uow, clock: clock, ids: ids, opts: opts}
+}
+
+// meta is what the events of one execution need besides the transaction itself. attempts is how many times a resumed
+// pending transaction was already tried.
+type meta struct {
+	correlationID string
+	causationID   string
+	attempts      int
 }
 
 type command struct {
@@ -185,7 +194,26 @@ func (uc *UseCase) run(ctx context.Context, tx usecase.Repos, c command, t *wage
 	if err != nil {
 		return Output{}, err
 	}
-	return uc.apply(ctx, tx, c, t, w)
+	out, err := uc.apply(ctx, tx, meta{correlationID: c.in.CorrelationID, causationID: c.in.CausationID}, t, w)
+	if err != nil {
+		return Output{}, err
+	}
+	return out, uc.wakeDependents(ctx, tx, t)
+}
+
+// Resume applies a PENDING_REFERENCE transaction again with the same rules as a new one. tx must hold the wallet lock and
+// the pending row, taken in that order. While the reference is still missing it reschedules, and once the deadline passes it rejects.
+func (uc *UseCase) Resume(ctx context.Context, tx usecase.Repos, t *wager.Transaction, w *wallet.Wallet) (Output, error) {
+	out, err := uc.apply(ctx, tx, meta{correlationID: t.CorrelationID(), attempts: t.Attempts()}, t, w)
+	if err != nil {
+		return Output{}, err
+	}
+	return out, uc.wakeDependents(ctx, tx, t)
+}
+
+// wakeDependents is the shortcut of ARCHITECTURE.md §4.4: whoever waits for this transaction is tried now, not at its next backoff.
+func (uc *UseCase) wakeDependents(ctx context.Context, tx usecase.Repos, t *wager.Transaction) error {
+	return tx.Transactions().WakeWaiting(ctx, t.ProviderID(), t.ExternalTransactionID())
 }
 
 func replay(ctx context.Context, tx usecase.Repos, c command) (Output, error) {
@@ -207,7 +235,7 @@ func replay(ctx context.Context, tx usecase.Repos, c command) (Output, error) {
 	return out, nil
 }
 
-func (uc *UseCase) apply(ctx context.Context, tx usecase.Repos, c command, t *wager.Transaction, w *wallet.Wallet) (Output, error) {
+func (uc *UseCase) apply(ctx context.Context, tx usecase.Repos, m meta, t *wager.Transaction, w *wallet.Wallet) (Output, error) {
 	now := uc.clock.Now()
 
 	var ref *wager.Transaction
@@ -222,16 +250,18 @@ func (uc *UseCase) apply(ctx context.Context, tx usecase.Repos, c command, t *wa
 
 		switch err := t.CheckReference(ref); {
 		case err == nil:
-		case errors.Is(err, wager.ErrReferenceNotFound), errors.Is(err, wager.ErrReferencePending):
-			return uc.waitForReference(ctx, tx, c, t, now)
+		case errors.Is(err, wager.ErrReferenceNotFound):
+			return uc.waitForReference(ctx, tx, m, t, wager.CodeReferenceNotFound, now)
+		case errors.Is(err, wager.ErrReferencePending):
+			return uc.waitForReference(ctx, tx, m, t, wager.CodeReferenceNotProcessed, now)
 		default:
-			return uc.reject(ctx, tx, c, t, referenceFailureCode(err), now)
+			return uc.reject(ctx, tx, m, t, referenceFailureCode(err), now)
 		}
 
 		if t.Kind() == wager.KindRefund || t.Kind() == wager.KindRollback {
 			_, err := tx.Transactions().ProcessedReversalOf(ctx, ref.ID())
 			if err == nil {
-				return uc.reject(ctx, tx, c, t, wager.CodeReferenceAlreadyReversed, now)
+				return uc.reject(ctx, tx, m, t, wager.CodeReferenceAlreadyReversed, now)
 			}
 			if !errors.Is(err, wager.ErrNotFound) {
 				return Output{}, err
@@ -243,11 +273,11 @@ func (uc *UseCase) apply(ctx context.Context, tx usecase.Repos, c command, t *wa
 	}
 
 	if t.Amount().Currency() != w.Currency() {
-		return uc.reject(ctx, tx, c, t, wager.CodeCurrencyMismatch, now)
+		return uc.reject(ctx, tx, m, t, wager.CodeCurrencyMismatch, now)
 	}
 
 	if t.Kind() == wager.KindLoss {
-		return uc.complete(ctx, tx, c, t, w, nil, now)
+		return uc.complete(ctx, tx, m, t, w, nil, now)
 	}
 
 	var refKind wager.Kind
@@ -273,7 +303,7 @@ func (uc *UseCase) apply(ctx context.Context, tx usecase.Repos, c command, t *wa
 		if t.Kind() == wager.KindRollback {
 			code = wager.CodeReversalInsufficientFunds
 		}
-		return uc.reject(ctx, tx, c, t, code, now)
+		return uc.reject(ctx, tx, m, t, code, now)
 	case err != nil:
 		return Output{}, err
 	}
@@ -284,24 +314,24 @@ func (uc *UseCase) apply(ctx context.Context, tx usecase.Repos, c command, t *wa
 	if err := tx.Ledger().Append(ctx, entry); err != nil {
 		return Output{}, fmt.Errorf("append ledger entry: %w", err)
 	}
-	return uc.complete(ctx, tx, c, t, w, &entry, now)
+	return uc.complete(ctx, tx, m, t, w, &entry, now)
 }
 
 // complete marks t processed with the wallet balance observed now and emits its events.
-func (uc *UseCase) complete(ctx context.Context, tx usecase.Repos, c command, t *wager.Transaction, w *wallet.Wallet, entry *wallet.LedgerEntry, now time.Time) (Output, error) {
+func (uc *UseCase) complete(ctx context.Context, tx usecase.Repos, m meta, t *wager.Transaction, w *wallet.Wallet, entry *wallet.LedgerEntry, now time.Time) (Output, error) {
 	if err := t.Process(w.Balance(), now); err != nil {
 		return Output{}, err
 	}
 	if err := tx.Transactions().Update(ctx, t, time.Time{}); err != nil {
 		return Output{}, err
 	}
-	processed, err := event.NewWagerTransactionProcessed(uc.ids.NewID(), c.in.CausationID, t)
+	processed, err := event.NewWagerTransactionProcessed(uc.ids.NewID(), m.causationID, t)
 	if err != nil {
 		return Output{}, err
 	}
 	events := []event.Event{processed}
 	if entry != nil {
-		changed, err := event.NewWalletBalanceChanged(uc.ids.NewID(), c.in.CorrelationID, c.in.CausationID, *entry)
+		changed, err := event.NewWalletBalanceChanged(uc.ids.NewID(), m.correlationID, m.causationID, *entry)
 		if err != nil {
 			return Output{}, err
 		}
@@ -313,14 +343,14 @@ func (uc *UseCase) complete(ctx context.Context, tx usecase.Repos, c command, t 
 	return outputOf(t), nil
 }
 
-func (uc *UseCase) reject(ctx context.Context, tx usecase.Repos, c command, t *wager.Transaction, code wager.FailureCode, now time.Time) (Output, error) {
+func (uc *UseCase) reject(ctx context.Context, tx usecase.Repos, m meta, t *wager.Transaction, code wager.FailureCode, now time.Time) (Output, error) {
 	if err := t.Reject(code, now); err != nil {
 		return Output{}, err
 	}
 	if err := tx.Transactions().Update(ctx, t, time.Time{}); err != nil {
 		return Output{}, err
 	}
-	rejected, err := event.NewWagerTransactionRejected(uc.ids.NewID(), c.in.CausationID, t)
+	rejected, err := event.NewWagerTransactionRejected(uc.ids.NewID(), m.causationID, t)
 	if err != nil {
 		return Output{}, err
 	}
@@ -330,14 +360,27 @@ func (uc *UseCase) reject(ctx context.Context, tx usecase.Repos, c command, t *w
 	return outputOf(t), nil
 }
 
-func (uc *UseCase) waitForReference(ctx context.Context, tx usecase.Repos, c command, t *wager.Transaction, now time.Time) (Output, error) {
+// waitForReference first parks a new transaction as PENDING_REFERENCE. A transaction that is already parked is rescheduled with
+// a growing delay, or rejected once its deadline has passed: with the code that says why the reference never became usable.
+func (uc *UseCase) waitForReference(ctx context.Context, tx usecase.Repos, m meta, t *wager.Transaction, expiredCode wager.FailureCode, now time.Time) (Output, error) {
+	if t.Status() == wager.StatusPendingReference {
+		if !now.Before(t.ExpiresAt()) {
+			return uc.reject(ctx, tx, m, t, expiredCode, now)
+		}
+		delay := backoff.Delay(m.attempts, pendingFirstAttempt, pendingMaxDelay, 0.2)
+		if err := tx.Transactions().Reschedule(ctx, t.ID(), delay); err != nil {
+			return Output{}, err
+		}
+		return outputOf(t), nil
+	}
+
 	if err := t.MarkPendingReference(now.Add(uc.opts.ReferenceTTL), now); err != nil {
 		return Output{}, err
 	}
 	if err := tx.Transactions().Update(ctx, t, now.Add(pendingFirstAttempt)); err != nil {
 		return Output{}, err
 	}
-	pending, err := event.NewWagerTransactionPendingReference(uc.ids.NewID(), c.in.CausationID, t)
+	pending, err := event.NewWagerTransactionPendingReference(uc.ids.NewID(), m.causationID, t)
 	if err != nil {
 		return Output{}, err
 	}
