@@ -1,25 +1,26 @@
 FROM golang:1.26.5-alpine AS builder
 
-WORKDIR /api
+WORKDIR /src
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o backend-challenge main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/wallet-service ./cmd/wallet-service && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/migrate ./cmd/migrate
 
 FROM alpine:3.23.3
 
 RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S backend-challenge-user && \
-    adduser -S backend-challenge-user -G backend-challenge-user
+    addgroup -S wallet && \
+    adduser -S wallet -G wallet
 
 WORKDIR /app
 
-COPY --from=builder /api/backend-challenge /app/backend-challenge
+COPY --from=builder /out/ /app/
 
-USER backend-challenge-user
+USER wallet
 
 EXPOSE 8081
 
-CMD ["./backend-challenge", "api"]
+CMD ["/app/wallet-service"]
