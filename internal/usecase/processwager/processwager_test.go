@@ -33,7 +33,34 @@ type harness struct {
 	t     *testing.T
 	store *fakeStore
 	uc    *UseCase
+	ids   *seqIDs
 	now   time.Time
+}
+
+var testOptions = Options{RetryBase: time.Millisecond, ReferenceTTL: 10 * time.Minute}
+
+// at returns a use case over the same store whose clock is d later.
+func (h *harness) at(d time.Duration) *UseCase {
+	return New(h.store, fixedClock(h.now.Add(d)), h.ids, testOptions)
+}
+
+// resume does what the resolver does for one pending transaction: wallet lock, pending row lock, Resume.
+func (h *harness) resume(uc *UseCase, id string) (Output, error) {
+	h.t.Helper()
+	var out Output
+	err := h.store.Do(context.Background(), func(ctx context.Context, tx usecase.Repos) error {
+		w, err := tx.Wallets().Lock(ctx, walletID)
+		if err != nil {
+			return err
+		}
+		t, err := tx.Transactions().LockPending(ctx, wallet.TxID(id))
+		if err != nil {
+			return err
+		}
+		out, err = uc.Resume(ctx, tx, t, w)
+		return err
+	})
+	return out, err
 }
 
 func newHarness(t *testing.T, balance int64) *harness {
@@ -49,10 +76,8 @@ func newHarness(t *testing.T, balance int64) *harness {
 		t.Fatal(err)
 	}
 	store.wallets[walletID] = w
-	return &harness{
-		t: t, store: store, now: now,
-		uc: New(store, fixedClock(now), &seqIDs{}, Options{RetryBase: time.Millisecond, ReferenceTTL: 10 * time.Minute}),
-	}
+	ids := &seqIDs{}
+	return &harness{t: t, store: store, now: now, ids: ids, uc: New(store, fixedClock(now), ids, testOptions)}
 }
 
 type spec struct {
@@ -716,4 +741,159 @@ func TestInbox(t *testing.T) {
 			t.Fatalf("out = %+v, %v, ledger = %d", out, err, len(h.store.ledger))
 		}
 	})
+}
+
+func TestResume(t *testing.T) {
+	ctx := context.Background()
+	// pendingRefund parks a refund of a bet that does not exist yet.
+	pendingRefund := func(t *testing.T, h *harness) string {
+		t.Helper()
+		out, err := h.uc.Execute(ctx, h.input(spec{ext: "r1", kind: "REFUND", ref: "b1", minor: 2500}))
+		if err != nil || out.Status != wager.StatusPendingReference {
+			t.Fatalf("parked = %+v, %v", out, err)
+		}
+		return out.TransactionID
+	}
+	eventTypes := func(h *harness) (types []string) {
+		for _, e := range h.store.outbox {
+			types = append(types, e.Type)
+		}
+		return types
+	}
+
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, h *harness)
+		after      time.Duration
+		wantStatus wager.Status
+		wantCode   wager.FailureCode
+		wantMinor  int64
+		wantEvents []string // emitted by the resume itself
+	}{
+		{
+			name:       "the reference arrived and the operation completes",
+			setup:      func(t *testing.T, h *harness) { mustExecute(t, h, spec{ext: "b1", kind: "BET", minor: 2500}) },
+			wantStatus: wager.StatusProcessed, wantMinor: 100000,
+			wantEvents: []string{"WalletBalanceChanged", "WagerTransactionProcessed"},
+		},
+		{
+			name:       "still missing before the deadline: it keeps waiting without a new event",
+			wantStatus: wager.StatusPendingReference, wantMinor: 100000,
+		},
+		{
+			name: "still missing after the deadline: rejected as not found", after: 11 * time.Minute,
+			wantStatus: wager.StatusRejected, wantCode: wager.CodeReferenceNotFound, wantMinor: 100000,
+			wantEvents: []string{"WagerTransactionRejected"},
+		},
+		{
+			name: "the reference is itself waiting, so the deadline rejects as not processed", after: 11 * time.Minute,
+			setup: func(t *testing.T, h *harness) {
+				// A rollback of the refund: the reference exists but is pending.
+				if out, err := h.uc.Execute(ctx, h.input(spec{ext: "b1", kind: "ROLLBACK", ref: "never", minor: 2500})); err != nil || out.Status != wager.StatusPendingReference {
+					t.Fatalf("setup = %+v, %v", out, err)
+				}
+			},
+			wantStatus: wager.StatusRejected, wantCode: wager.CodeReferenceNotProcessed, wantMinor: 100000,
+			wantEvents: []string{"WagerTransactionRejected"},
+		},
+		{
+			name: "a reference that ended without success rejects at once, before the deadline",
+			setup: func(t *testing.T, h *harness) {
+				if out, err := h.uc.Execute(ctx, h.input(spec{ext: "b1", kind: "BET", minor: 999999})); err != nil || out.Status != wager.StatusRejected {
+					t.Fatalf("setup = %+v, %v", out, err)
+				}
+			},
+			wantStatus: wager.StatusRejected, wantCode: wager.CodeReferenceNotProcessed, wantMinor: 100000,
+			wantEvents: []string{"WagerTransactionRejected"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 100000)
+			id := pendingRefund(t, h)
+			if tt.setup != nil {
+				tt.setup(t, h)
+			}
+			beforeEvents := eventTypes(h)
+
+			out, err := h.resume(h.at(tt.after), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Status != tt.wantStatus || out.FailureCode != tt.wantCode {
+				t.Fatalf("out = %+v", out)
+			}
+			if got := h.balance(); got != tt.wantMinor {
+				t.Fatalf("balance = %d, want %d", got, tt.wantMinor)
+			}
+			got := eventTypes(h)[len(beforeEvents):]
+			if len(got) != len(tt.wantEvents) {
+				t.Fatalf("new events = %v, want %v", got, tt.wantEvents)
+			}
+			if tt.wantStatus == wager.StatusPendingReference && (len(h.store.delays) != 1 || h.store.txs[wallet.TxID(id)].Attempts() != 1) {
+				t.Fatalf("delays = %v, attempts = %d", h.store.delays, h.store.txs[wallet.TxID(id)].Attempts())
+			}
+		})
+	}
+
+	t.Run("the waiting time grows with the attempts and is capped", func(t *testing.T) {
+		h := newHarness(t, 100000)
+		id := pendingRefund(t, h)
+		for range 12 {
+			if _, err := h.resume(h.at(0), id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		d := h.store.delays
+		within := func(i int, want time.Duration) {
+			t.Helper()
+			if lo, hi := want*8/10, want*12/10; d[i] < lo || d[i] > hi {
+				t.Fatalf("delay %d = %v, want %v ±20%%", i, d[i], want)
+			}
+		}
+		within(0, time.Second)
+		within(1, 2*time.Second)
+		within(2, 4*time.Second)
+		within(5, 32*time.Second)
+		within(6, time.Minute)
+		within(11, time.Minute)
+	})
+
+	t.Run("a transaction settled by another replica is not found, so nothing happens twice", func(t *testing.T) {
+		h := newHarness(t, 100000)
+		id := pendingRefund(t, h)
+		mustExecute(t, h, spec{ext: "b1", kind: "BET", minor: 2500})
+		if _, err := h.resume(h.at(0), id); err != nil {
+			t.Fatal(err)
+		}
+		ledger := len(h.store.ledger)
+		if _, err := h.resume(h.at(0), id); !errors.Is(err, wager.ErrNotFound) {
+			t.Fatalf("second resume err = %v, want ErrNotFound", err)
+		}
+		if len(h.store.ledger) != ledger {
+			t.Fatal("the second resume wrote to the ledger")
+		}
+	})
+
+	t.Run("a new transaction wakes the ones waiting for it", func(t *testing.T) {
+		h := newHarness(t, 100000)
+		mustExecute(t, h, spec{ext: "b1", kind: "BET", minor: 2500})
+		if len(h.store.woken) != 1 || h.store.woken[0] != "provider-a/b1" {
+			t.Fatalf("woken = %v", h.store.woken)
+		}
+		// A replay is not a new transaction: nobody waits on it any more than before.
+		mustExecute(t, h, spec{ext: "b1", kind: "BET", minor: 2500})
+		if len(h.store.woken) != 1 {
+			t.Fatalf("woken after replay = %v", h.store.woken)
+		}
+	})
+}
+
+func mustExecute(t *testing.T, h *harness, s spec) Output {
+	t.Helper()
+	out, err := h.uc.Execute(context.Background(), h.input(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
