@@ -2,7 +2,6 @@ package openwallet
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/celio001/backend-challenge-go/internal/domain/event"
@@ -86,7 +85,7 @@ func (uc *UseCase) Execute(ctx context.Context, in Input) (*wallet.Wallet, error
 		if err := tx.Ledger().Append(ctx, entry); err != nil {
 			return fmt.Errorf("append opening ledger entry: %w", err)
 		}
-		return addEvents(ctx, tx, processed, changed)
+		return usecase.AddEvents(ctx, tx, processed, changed)
 	})
 	if err != nil {
 		return nil, err
@@ -97,29 +96,6 @@ func (uc *UseCase) Execute(ctx context.Context, in Input) (*wallet.Wallet, error
 func createWallet(ctx context.Context, tx usecase.Repos, w *wallet.Wallet) error {
 	if err := tx.Wallets().Create(ctx, w); err != nil {
 		return fmt.Errorf("create wallet: %w", err)
-	}
-	return nil
-}
-
-func addEvents(ctx context.Context, tx usecase.Repos, events ...event.Event) error {
-	for _, e := range events {
-		payload, err := json.Marshal(e)
-		if err != nil {
-			return fmt.Errorf("marshal %s: %w", e.Type, err)
-		}
-		err = tx.Outbox().Add(ctx, usecase.OutboxEvent{
-			ID:            e.ID,
-			AggregateType: e.AggregateType,
-			AggregateID:   e.AggregateID,
-			PartitionKey:  e.PartitionKey,
-			Type:          e.Type,
-			Version:       e.Version,
-			Payload:       payload,
-			OccurredAt:    e.OccurredAt,
-		})
-		if err != nil {
-			return fmt.Errorf("add %s event: %w", e.Type, err)
-		}
 	}
 	return nil
 }
