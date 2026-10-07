@@ -21,7 +21,7 @@ func Install(t *testing.T) *Recorder {
 	t.Helper()
 	rec := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 	t.Cleanup(func() {
 		otel.SetTracerProvider(noop.NewTracerProvider())
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
