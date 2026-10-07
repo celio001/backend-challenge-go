@@ -1,0 +1,18 @@
+# Scrapes the three replicas of the service. Each one exposes only what it handled itself, so dashboards sum over `instance`.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: wallet-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend-challenge-1:8081", "backend-challenge-2:8081", "backend-challenge-3:8081"]
+        labels:
+          service: wallet-service
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
