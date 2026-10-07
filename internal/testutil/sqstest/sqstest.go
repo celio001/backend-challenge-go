@@ -88,6 +88,14 @@ func create(t *testing.T, attrs map[string]string) Queue {
 	return Queue{Client: client, URL: url, Name: name}
 }
 
+// Send puts one message on the queue.
+func (q Queue) Send(ctx context.Context, group, dedup, body string) error {
+	_, err := q.Client.SendMessage(ctx, &awssqs.SendMessageInput{
+		QueueUrl: aws.String(q.URL), MessageBody: aws.String(body), MessageGroupId: aws.String(group), MessageDeduplicationId: aws.String(dedup),
+	})
+	return err
+}
+
 // Drain receives and deletes messages until the queue stays empty for a moment, returning them in arrival order.
 // Deleting matters on FIFO queues: the next message of a group is only delivered after the previous one is gone.
 func (q Queue) Drain(t *testing.T) []Received {
