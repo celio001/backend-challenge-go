@@ -36,7 +36,7 @@ test: ## Run tests
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (TEST_DATABASE_URL: Postgres superuser; TEST_KEYCLOAK_URL: Keycloak with the wallet realm)
-	TEST_KEYCLOAK_URL=$(TEST_KEYCLOAK_URL) $(GO) test -tags integration -count=1 -race ./internal/infra/...
+	TEST_KEYCLOAK_URL=$(TEST_KEYCLOAK_URL) $(GO) test -tags integration -count=1 -race -timeout 5m ./internal/...
 
 migrate-up: ## Run migrations up
 	goose -dir $(MIGRATIONS_DIR) postgres "$(DB_URL)" up
