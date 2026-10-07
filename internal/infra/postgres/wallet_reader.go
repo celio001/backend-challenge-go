@@ -21,13 +21,18 @@ func NewWalletReader(db querier) *WalletReader {
 }
 
 func (r *WalletReader) ByID(ctx context.Context, id wallet.WalletID) (*wallet.Wallet, error) {
+	return loadWallet(ctx, r.db, id, "")
+}
+
+// loadWallet rehydrates a wallet; suffix is appended to the query (e.g. " FOR UPDATE").
+func loadWallet(ctx context.Context, db querier, id wallet.WalletID, suffix string) (*wallet.Wallet, error) {
 	var (
 		playerID, currency   string
 		balance, version     int64
 		createdAt, updatedAt time.Time
 	)
-	err := r.db.QueryRow(ctx,
-		`SELECT player_id, currency, balance_minor, version, created_at, updated_at FROM wallets WHERE id = $1`,
+	err := db.QueryRow(ctx,
+		`SELECT player_id, currency, balance_minor, version, created_at, updated_at FROM wallets WHERE id = $1`+suffix,
 		string(id)).Scan(&playerID, &currency, &balance, &version, &createdAt, &updatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, wallet.ErrNotFound
