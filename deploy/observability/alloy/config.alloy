@@ -1,0 +1,73 @@
+// Ships the logs of the compose containers to Loki. The service writes one JSON object per line (log/slog).
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  // Only this compose project's containers; the label is also how a line is told which service wrote it.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "backend-challenge-go"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.process.service.receiver]
+}
+
+loki.process "service" {
+  // Only the service's own lines are JSON; Keycloak, LocalStack and the others are shipped as they are.
+  stage.match {
+    selector = "{service=~\"backend-challenge-[0-9]+\"}"
+
+    stage.json {
+      expressions = {
+        time          = "time",
+        level         = "level",
+        correlationId = "correlationId",
+        traceId       = "traceId",
+        transactionId = "transactionId",
+        walletId      = "walletId",
+        providerId    = "providerId",
+        messageId     = "messageId",
+      }
+    }
+    stage.timestamp {
+      source = "time"
+      format = "RFC3339Nano"
+    }
+    // The level is the only label: it has four values. The identifiers are unbounded, so they travel as structured metadata
+    // and are searched with `| walletId="..."`, without creating a stream per wallet.
+    stage.labels {
+      values = { level = "" }
+    }
+    stage.structured_metadata {
+      values = {
+        correlationId = "",
+        traceId       = "",
+        transactionId = "",
+        walletId      = "",
+        providerId    = "",
+        messageId     = "",
+      }
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
