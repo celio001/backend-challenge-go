@@ -20,6 +20,9 @@ x-app: &app
     # LocalStack reports its account id as the SenderId of every message, so locally only one provider can be mapped.
     # On AWS, map each provider's IAM principal id to its provider id.
     SQS_SENDER_PROVIDER_MAP: "000000000000=provider-a"
+    # Tracing is off unless an OTLP endpoint is given (`make up-tracing` points it at the jaeger service below).
+    OTEL_SERVICE_NAME: wallet-service
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   networks:
     - backend-challenge-go
   depends_on: &app-deps
@@ -135,6 +138,15 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
+
+  jaeger:
+    profiles: ["tracing"]
+    image: jaegertracing/all-in-one:1.76.0
+    ports:
+      - "16686:16686"
+      - "4318:4318"
+    networks:
+      - backend-challenge-go
 
   localstack:
     image: localstack/localstack:3.8
