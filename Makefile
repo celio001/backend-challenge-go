@@ -8,7 +8,7 @@ DB_PASSWORD ?= postgres
 DB_NAME ?= challenge
 DB_SSL_MODE ?= disable
 
-TEST_DATABASE_URL ?= postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/postgres?sslmode=$(DB_SSL_MODE)
+TEST_DATABASE_URL ?= postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/challenge?sslmode=$(DB_SSL_MODE)
 TEST_KEYCLOAK_URL ?= http://localhost:8080
 TEST_SQS_ENDPOINT ?= http://localhost:4566
 
@@ -24,9 +24,13 @@ help:
 up: ## Build and start the whole stack (3 replicas, Postgres, Keycloak, LocalStack)
 	docker compose up --build -d
 
+.PHONY: up-tracing
+up-tracing: ## Like `up`, plus Jaeger (UI on :16686) with every replica exporting its traces to it
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile tracing up --build -d
+
 .PHONY: down
 down: ## Stop the stack, keeping the database volume
-	docker compose down
+	docker compose --profile tracing down
 
 .PHONY: compose-migrate-up
 compose-migrate-up: ## Apply the pending migrations inside the compose network
