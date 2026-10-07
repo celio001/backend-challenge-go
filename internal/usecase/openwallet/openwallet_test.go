@@ -25,8 +25,8 @@ type fakeStore struct {
 	events    []usecase.OutboxEvent
 }
 
-func (s *fakeStore) Wallets() usecase.WalletRepository           { return fakeWallets{s} }
-func (s *fakeStore) Transactions() usecase.TransactionRepository { return fakeTxs{s} }
+func (s *fakeStore) Wallets() usecase.WalletRepository           { return fakeWallets{s: s} }
+func (s *fakeStore) Transactions() usecase.TransactionRepository { return fakeTxs{s: s} }
 func (s *fakeStore) Ledger() usecase.LedgerRepository            { return fakeLedger{s} }
 func (s *fakeStore) Outbox() usecase.OutboxWriter                { return fakeOutbox{s} }
 
@@ -40,7 +40,11 @@ func (s *fakeStore) Do(ctx context.Context, fn func(context.Context, usecase.Rep
 	return nil
 }
 
-type fakeWallets struct{ s *fakeStore }
+// Embedding the port keeps the fake minimal: only the methods this use case calls are implemented.
+type fakeWallets struct {
+	usecase.WalletRepository
+	s *fakeStore
+}
 
 func (f fakeWallets) Create(_ context.Context, w *wallet.Wallet) error {
 	if f.s.walletErr != nil {
@@ -50,7 +54,10 @@ func (f fakeWallets) Create(_ context.Context, w *wallet.Wallet) error {
 	return nil
 }
 
-type fakeTxs struct{ s *fakeStore }
+type fakeTxs struct {
+	usecase.TransactionRepository
+	s *fakeStore
+}
 
 func (f fakeTxs) Insert(_ context.Context, t *wager.Transaction) error {
 	f.s.txs = append(f.s.txs, t)
