@@ -16,15 +16,17 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name: "defaults",
 			env:  map[string]string{"DATABASE_URL": "postgres://db", "OIDC_ISSUER": "http://idp/realms/wallet"},
-			want: Config{HTTPAddr: ":8081", DatabaseURL: "postgres://db", OIDCIssuer: "http://idp/realms/wallet", OIDCAudience: "wallet-api", ReferenceTTL: 10 * time.Minute},
+			want: Config{HTTPAddr: ":8081", DatabaseURL: "postgres://db", OIDCIssuer: "http://idp/realms/wallet", OIDCAudience: "wallet-api", ReferenceTTL: 10 * time.Minute, AWSRegion: "us-east-1", EventsQueueName: "wallet-events.fifo"},
 		},
 		{
 			name: "everything set",
 			env: map[string]string{
 				"HTTP_ADDR": ":9000", "DATABASE_URL": "postgres://db", "OIDC_ISSUER": "http://localhost:8080/realms/wallet",
 				"OIDC_DISCOVERY_URL": "http://keycloak:8080/realms/wallet", "OIDC_AUDIENCE": "other", "REFERENCE_TTL": "90s",
+				"AWS_REGION": "sa-east-1", "SQS_ENDPOINT": "http://localstack:4566", "EVENTS_QUEUE_NAME": "events.fifo", "EVENTS_QUEUE_URL": "http://localstack:4566/000000000000/events.fifo",
 			},
-			want: Config{HTTPAddr: ":9000", DatabaseURL: "postgres://db", OIDCIssuer: "http://localhost:8080/realms/wallet", OIDCDiscoveryURL: "http://keycloak:8080/realms/wallet", OIDCAudience: "other", ReferenceTTL: 90 * time.Second},
+			want: Config{HTTPAddr: ":9000", DatabaseURL: "postgres://db", OIDCIssuer: "http://localhost:8080/realms/wallet", OIDCDiscoveryURL: "http://keycloak:8080/realms/wallet", OIDCAudience: "other", ReferenceTTL: 90 * time.Second,
+				AWSRegion: "sa-east-1", SQSEndpoint: "http://localstack:4566", EventsQueueName: "events.fifo", EventsQueueURL: "http://localstack:4566/000000000000/events.fifo"},
 		},
 		{name: "missing database", env: map[string]string{"OIDC_ISSUER": "http://idp"}, wantErr: ErrInvalidConfig},
 		{name: "missing issuer", env: map[string]string{"DATABASE_URL": "postgres://db"}, wantErr: ErrInvalidConfig},
