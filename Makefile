@@ -28,6 +28,14 @@ up: ## Build and start the whole stack (3 replicas, Postgres, Keycloak, LocalSta
 down: ## Stop the stack, keeping the database volume
 	docker compose down
 
+.PHONY: compose-migrate-up
+compose-migrate-up: ## Apply the pending migrations inside the compose network
+	docker compose run --rm --no-deps migrate /app/migrate up
+
+.PHONY: compose-migrate-status
+compose-migrate-status: ## Show the applied migrations inside the compose network
+	docker compose run --rm --no-deps migrate /app/migrate status
+
 .PHONY: compose-migrate-down
 compose-migrate-down: ## Revert the last migration inside the compose network
 	docker compose run --rm --no-deps migrate /app/migrate down
