@@ -20,6 +20,10 @@ help:
 test: ## Run tests
 	$(GO) test ./... -count=1 -v ./... -race
 
+.PHONY: test-integration
+test-integration: ## Run integration tests (TEST_DATABASE_URL must point to a Postgres superuser)
+	$(GO) test -tags integration -count=1 -race ./internal/infra/migrations/...
+
 migrate-up: ## Run migrations up
 	goose -dir $(MIGRATIONS_DIR) postgres "$(DB_URL)" up
 
