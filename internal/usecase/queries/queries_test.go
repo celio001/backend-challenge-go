@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/celio001/backend-challenge-go/internal/domain/money"
+	"github.com/celio001/backend-challenge-go/internal/domain/wager"
 	"github.com/celio001/backend-challenge-go/internal/domain/wallet"
 )
 
@@ -78,7 +79,7 @@ func TestWallet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := New(fakeWallets{w: w, err: tt.readErr}, fakeLedger{}).Wallet(context.Background(), tt.id)
+			got, err := New(fakeWallets{w: w, err: tt.readErr}, fakeLedger{}, nil).Wallet(context.Background(), tt.id)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -122,7 +123,7 @@ func TestLedger(t *testing.T) {
 			zero, _ := money.Zero(money.BRL)
 			now := time.Now()
 			w, _ := wallet.Rehydrate(walletID, "p1", zero, 1, now, now)
-			q := New(fakeWallets{w: w, err: tt.walletErr}, fakeLedger{items: tt.items, err: tt.ledgerErr})
+			q := New(fakeWallets{w: w, err: tt.walletErr}, fakeLedger{items: tt.items, err: tt.ledgerErr}, nil)
 
 			page, err := q.Ledger(context.Background(), walletID, tt.cursor, tt.limit)
 
@@ -155,5 +156,66 @@ func TestLedger(t *testing.T) {
 func TestCursorMatchesDocumentedFormat(t *testing.T) {
 	if got := encodeCursor(1); got != "eyJ2IjoxfQ" {
 		t.Fatalf("encodeCursor(1) = %q", got)
+	}
+}
+
+type fakeTxReader struct {
+	byID  map[wallet.TxID]*wager.Transaction
+	byExt map[string]*wager.Transaction
+}
+
+func (f fakeTxReader) ByID(_ context.Context, id wallet.TxID) (*wager.Transaction, error) {
+	if t, ok := f.byID[id]; ok {
+		return t, nil
+	}
+	return nil, wager.ErrNotFound
+}
+
+func (f fakeTxReader) ByExternalID(_ context.Context, provider, ext string) (*wager.Transaction, error) {
+	if t, ok := f.byExt[provider+"/"+ext]; ok {
+		return t, nil
+	}
+	return nil, wager.ErrNotFound
+}
+
+func TestTransactionQueries(t *testing.T) {
+	const txID = "0192f298-345e-7e38-af88-e43f851a819d"
+	m, _ := money.FromMinor(2500, money.BRL)
+	tx, err := wager.NewExternal(wager.ExternalInput{
+		ID: txID, ProviderID: "provider-a", ExternalTransactionID: "ext-1", IdempotencyKey: "k", PayloadHash: make([]byte, 32),
+		WalletID: walletID, PlayerID: "p1", RoundID: "r", GameID: "g", Kind: wager.KindBet, Amount: m,
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := New(nil, nil, fakeTxReader{byID: map[wallet.TxID]*wager.Transaction{txID: tx}, byExt: map[string]*wager.Transaction{"provider-a/ext-1": tx}})
+
+	tests := []struct {
+		name    string
+		find    func() (*wager.Transaction, error)
+		wantErr error
+	}{
+		{name: "by id", find: func() (*wager.Transaction, error) { return q.Transaction(context.Background(), txID) }},
+		{name: "unknown id", find: func() (*wager.Transaction, error) {
+			return q.Transaction(context.Background(), "0192f298-345e-7e38-af88-000000000000")
+		}, wantErr: wager.ErrNotFound},
+		{name: "id that is not a uuid looks like a missing one", find: func() (*wager.Transaction, error) { return q.Transaction(context.Background(), "nope") }, wantErr: wager.ErrNotFound},
+		{name: "by provider and external id", find: func() (*wager.Transaction, error) {
+			return q.ProviderTransaction(context.Background(), "provider-a", "ext-1")
+		}},
+		{name: "another provider cannot see it", find: func() (*wager.Transaction, error) {
+			return q.ProviderTransaction(context.Background(), "provider-b", "ext-1")
+		}, wantErr: wager.ErrNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.find()
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr == nil && got != tx {
+				t.Fatalf("got %v", got)
+			}
+		})
 	}
 }
