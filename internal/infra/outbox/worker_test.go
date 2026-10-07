@@ -8,6 +8,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/celio001/backend-challenge-go/internal/testutil/spantest"
 )
 
 type fakeStore struct {
@@ -308,4 +313,62 @@ func TestFullBatchesAreDrainedWithoutWaiting(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+func TestEachPublicationHasASpanThatSaysWhetherItWorked(t *testing.T) {
+	rec := spantest.Install(t)
+	store := newFakeStore(msg("evt-ok", 0), msg("evt-bad", 2))
+	pub := &fakePublisher{fail: map[string]error{"evt-bad": errors.New("throttled")}}
+
+	if _, err := New(store, pub, Config{Owner: "r1"}, quiet()).RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	spans := rec.Named("outbox.publish")
+	if len(spans) != 2 {
+		t.Fatalf("spans = %d", len(spans))
+	}
+	for _, s := range spans {
+		attrs := spantest.Attrs(s)
+		if attrs["event.type"] != "WalletBalanceChanged" || attrs["wallet.id"] != "wallet-1" {
+			t.Fatalf("attributes = %v", attrs)
+		}
+		switch attrs["event.id"] {
+		case "evt-ok":
+			if s.Status().Code == codes.Error || attrs["outbox.attempt"] != "1" {
+				t.Fatalf("the successful publication: status %v, attributes %v", s.Status(), attrs)
+			}
+		case "evt-bad":
+			if s.Status().Code != codes.Error || attrs["outbox.attempt"] != "3" {
+				t.Fatalf("the failed publication: status %v, attributes %v", s.Status(), attrs)
+			}
+		default:
+			t.Fatalf("unexpected event %v", attrs)
+		}
+	}
+}
+
+// The publisher receives the span's context, which is what lets the broker message carry the trace on.
+func TestThePublisherIsCalledWithTheSpanContext(t *testing.T) {
+	spantest.Install(t)
+	var inside bool
+	pub := &fakePublisher{}
+	store := newFakeStore(msg("evt-1", 0))
+	w := New(store, ctxPublisher{pub, &inside}, Config{Owner: "r1"}, quiet())
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !inside {
+		t.Fatal("Publish ran outside the publication span")
+	}
+}
+
+type ctxPublisher struct {
+	*fakePublisher
+	inside *bool
+}
+
+func (p ctxPublisher) Publish(ctx context.Context, m Message) error {
+	*p.inside = trace.SpanContextFromContext(ctx).IsValid()
+	return p.fakePublisher.Publish(ctx, m)
 }
