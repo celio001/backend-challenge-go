@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/celio001/backend-challenge-go/internal/domain/money"
+	"github.com/celio001/backend-challenge-go/internal/domain/wager"
 	"github.com/celio001/backend-challenge-go/internal/domain/wallet"
 	"github.com/celio001/backend-challenge-go/pkg/uuid"
 )
@@ -49,13 +50,32 @@ type LedgerReader interface {
 	After(ctx context.Context, id wallet.WalletID, afterVersion int64, limit int) ([]LedgerItem, error)
 }
 
-type Queries struct {
-	wallets WalletReader
-	ledger  LedgerReader
+type TransactionReader interface {
+	// Both lookups must return wager.ErrNotFound when the transaction does not exist.
+	ByID(ctx context.Context, id wallet.TxID) (*wager.Transaction, error)
+	ByExternalID(ctx context.Context, providerID, externalID string) (*wager.Transaction, error)
 }
 
-func New(wallets WalletReader, ledger LedgerReader) *Queries {
-	return &Queries{wallets: wallets, ledger: ledger}
+type Queries struct {
+	wallets      WalletReader
+	ledger       LedgerReader
+	transactions TransactionReader
+}
+
+func New(wallets WalletReader, ledger LedgerReader, transactions TransactionReader) *Queries {
+	return &Queries{wallets: wallets, ledger: ledger, transactions: transactions}
+}
+
+// Transaction treats an id that is not a UUID as unknown: the caller cannot tell it from a missing one.
+func (q *Queries) Transaction(ctx context.Context, id string) (*wager.Transaction, error) {
+	if !uuid.Valid(id) {
+		return nil, wager.ErrNotFound
+	}
+	return q.transactions.ByID(ctx, wallet.TxID(id))
+}
+
+func (q *Queries) ProviderTransaction(ctx context.Context, providerID, externalID string) (*wager.Transaction, error) {
+	return q.transactions.ByExternalID(ctx, providerID, externalID)
 }
 
 func (q *Queries) Wallet(ctx context.Context, id string) (*wallet.Wallet, error) {
