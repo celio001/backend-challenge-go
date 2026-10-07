@@ -201,7 +201,7 @@ func TestReadTransactions(t *testing.T) {
 	const id = "0192f298-345e-7e38-af88-e43f851a819d"
 	wantPending := `{"transactionId":"` + id + `","status":"PENDING_REFERENCE","providerId":"provider-a","externalTransactionId":"transaction-123","walletId":"` + walletID +
 		`","playerId":"` + playerID + `","roundId":"round-987","gameId":"fortune-chimp","kind":"REFUND","money":{"amount":"25.00","currency":"BRL"},` +
-		`"referenceExternalTransactionId":"transaction-100","expiresAt":"2026-09-08T12:10:00.000Z","createdAt":"2026-09-08T12:00:00.000Z","updatedAt":"2026-09-08T12:00:00.000Z"}`
+		`"referenceExternalTransactionId":"transaction-100","expiresAt":"2026-09-08T12:10:00.000Z","attempts":0,"createdAt":"2026-09-08T12:00:00.000Z","updatedAt":"2026-09-08T12:00:00.000Z"}`
 
 	tests := []struct {
 		name       string
@@ -251,6 +251,64 @@ func TestReadTransactions(t *testing.T) {
 			}
 			if tt.wantStatus == 404 && strings.Contains(rec.Body.String(), "provider-a") {
 				t.Fatal("a 404 leaked data about the transaction")
+			}
+		})
+	}
+}
+
+func TestPendingProgressIsVisibleOnlyWhileWaiting(t *testing.T) {
+	at := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	base := wager.Snapshot{
+		ID: "0192f298-345e-7e38-af88-e43f851a819d", Origin: wager.OriginExternal, Kind: wager.KindRefund, WalletID: walletID, PlayerID: playerID,
+		Amount: brlMinor(t, 2500), ProviderID: "provider-a", ExternalTransactionID: "transaction-123", IdempotencyKey: "k",
+		PayloadHash: make([]byte, 32), RoundID: "round-987", GameID: "fortune-chimp", ReferenceExternalID: "transaction-100",
+		CreatedAt: at, UpdatedAt: at,
+	}
+	tests := []struct {
+		name         string
+		mutate       func(*wager.Snapshot)
+		wantContains []string
+		wantMissing  []string
+	}{
+		{
+			name: "waiting shows how many tries and when the next one is",
+			mutate: func(s *wager.Snapshot) {
+				s.Status, s.ExpiresAt, s.Attempts, s.NextAttemptAt = wager.StatusPendingReference, at.Add(10*time.Minute), 3, at.Add(8*time.Second)
+			},
+			wantContains: []string{`"attempts":3`, `"nextAttemptAt":"2026-09-08T12:00:08.000Z"`},
+		},
+		{
+			name: "rejected after waiting hides the scheduling facts",
+			mutate: func(s *wager.Snapshot) {
+				s.Status, s.FailureCode, s.Attempts = wager.StatusRejected, wager.CodeReferenceNotFound, 7
+			},
+			wantContains: []string{`"failureCode":"REFERENCE_NOT_FOUND"`},
+			wantMissing:  []string{"attempts", "nextAttemptAt"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := base
+			tt.mutate(&snap)
+			tx, err := wager.Rehydrate(snap)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := newEnv(t)
+			e.txq.tx = tx
+			rec := do(e.h, http.MethodGet, "/wagering/transactions/"+string(tx.ID()), "admin", "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(rec.Body.String(), want) {
+					t.Fatalf("body %s lacks %s", rec.Body.String(), want)
+				}
+			}
+			for _, not := range tt.wantMissing {
+				if strings.Contains(rec.Body.String(), not) {
+					t.Fatalf("body %s has %s", rec.Body.String(), not)
+				}
 			}
 		})
 	}
