@@ -18,6 +18,9 @@ const txColumns = `id, origin, kind, status, wallet_id, player_id, amount_minor,
 	reference_external_transaction_id, reference_transaction_id, failure_code, result_balance_minor,
 	correlation_id, expires_at, created_at, updated_at`
 
+// selectColumns adds the scheduling facts that are read but never written through the domain object.
+const selectColumns = txColumns + `, attempts, next_attempt_at`
+
 type TransactionRepository struct {
 	db dbtx
 }
@@ -60,7 +63,7 @@ func (r *TransactionRepository) insert(ctx context.Context, t *wager.Transaction
 
 func (r *TransactionRepository) FindDuplicate(ctx context.Context, providerID, idempotencyKey, externalID string) (*wager.Transaction, error) {
 	return selectTransaction(ctx, r.db,
-		`SELECT `+txColumns+` FROM wager_transactions
+		`SELECT `+selectColumns+` FROM wager_transactions
 		  WHERE origin = 'EXTERNAL' AND provider_id = $1 AND (idempotency_key = $2 OR external_transaction_id = $3)
 		  ORDER BY (idempotency_key = $2) DESC LIMIT 1`,
 		providerID, idempotencyKey, externalID)
@@ -68,14 +71,14 @@ func (r *TransactionRepository) FindDuplicate(ctx context.Context, providerID, i
 
 func (r *TransactionRepository) FindByExternalID(ctx context.Context, providerID, externalID string) (*wager.Transaction, error) {
 	return selectTransaction(ctx, r.db,
-		`SELECT `+txColumns+` FROM wager_transactions
+		`SELECT `+selectColumns+` FROM wager_transactions
 		  WHERE origin = 'EXTERNAL' AND provider_id = $1 AND external_transaction_id = $2`,
 		providerID, externalID)
 }
 
 func (r *TransactionRepository) ProcessedReversalOf(ctx context.Context, refID wallet.TxID) (*wager.Transaction, error) {
 	return selectTransaction(ctx, r.db,
-		`SELECT `+txColumns+` FROM wager_transactions
+		`SELECT `+selectColumns+` FROM wager_transactions
 		  WHERE reference_transaction_id = $1 AND status = 'PROCESSED' AND kind IN ('REFUND','ROLLBACK')`,
 		string(refID))
 }
@@ -88,7 +91,7 @@ func (r *TransactionRepository) Update(ctx context.Context, t *wager.Transaction
 	tag, err := r.db.Exec(ctx,
 		`UPDATE wager_transactions
 		    SET status = $2, failure_code = $3, result_balance_minor = $4, reference_transaction_id = $5,
-		        expires_at = $6, next_attempt_at = $7, updated_at = $8
+		        expires_at = $6, next_attempt_at = $7, locked_until = NULL, updated_at = $8
 		  WHERE id = $1`,
 		string(t.ID()), string(t.Status()), nullString(string(t.FailureCode())), result, nullString(string(t.ReferenceTxID())),
 		nullTime(t.ExpiresAt()), nullTime(nextAttemptAt), t.UpdatedAt())
@@ -97,6 +100,41 @@ func (r *TransactionRepository) Update(ctx context.Context, t *wager.Transaction
 	}
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("update wager transaction %s: %w", t.ID(), wager.ErrNotFound)
+	}
+	return nil
+}
+
+func (r *TransactionRepository) LockPending(ctx context.Context, id wallet.TxID) (*wager.Transaction, error) {
+	return selectTransaction(ctx, r.db,
+		`SELECT `+selectColumns+` FROM wager_transactions WHERE id = $1 AND status = 'PENDING_REFERENCE' FOR NO KEY UPDATE`,
+		string(id))
+}
+
+func (r *TransactionRepository) Reschedule(ctx context.Context, id wallet.TxID, delay time.Duration) error {
+	tag, err := r.db.Exec(ctx,
+		`UPDATE wager_transactions
+		    SET attempts = attempts + 1, next_attempt_at = now() + make_interval(secs => $2), locked_until = NULL
+		  WHERE id = $1 AND status = 'PENDING_REFERENCE'`,
+		string(id), delay.Seconds())
+	if err != nil {
+		return fmt.Errorf("reschedule wager transaction: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("reschedule wager transaction %s: %w", id, wager.ErrNotFound)
+	}
+	return nil
+}
+
+func (r *TransactionRepository) WakeWaiting(ctx context.Context, providerID, externalID string) error {
+	if _, err := r.db.Exec(ctx,
+		`UPDATE wager_transactions
+		    SET next_attempt_at = now()
+		  WHERE id IN (SELECT id FROM wager_transactions
+		                WHERE status = 'PENDING_REFERENCE' AND provider_id = $1 AND reference_external_transaction_id = $2
+		                  AND next_attempt_at > now()
+		                FOR NO KEY UPDATE SKIP LOCKED)`,
+		providerID, externalID); err != nil {
+		return fmt.Errorf("wake waiting transactions: %w", err)
 	}
 	return nil
 }
@@ -110,11 +148,12 @@ func selectTransaction(ctx context.Context, db querier, sql string, args ...any)
 		failure, correlation                                   *string
 		hash                                                   []byte
 		result                                                 *int64
-		expires                                                *time.Time
+		expires, nextAttempt                                   *time.Time
+		attempts                                               int
 	)
 	err := db.QueryRow(ctx, sql, args...).Scan(&id, &origin, &kind, &status, &walletID, &playerID, &amount, &currency,
 		&provider, &external, &key, &hash, &round, &game, &refExt, &refID, &failure, &result,
-		&correlation, &expires, &s.CreatedAt, &s.UpdatedAt)
+		&correlation, &expires, &s.CreatedAt, &s.UpdatedAt, &attempts, &nextAttempt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, wager.ErrNotFound
 	}
@@ -139,6 +178,10 @@ func selectTransaction(ctx context.Context, db querier, sql string, args ...any)
 	}
 	if expires != nil {
 		s.ExpiresAt = *expires
+	}
+	s.Attempts = attempts
+	if nextAttempt != nil {
+		s.NextAttemptAt = *nextAttempt
 	}
 	t, err := wager.Rehydrate(s)
 	if err != nil {
