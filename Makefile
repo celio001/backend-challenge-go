@@ -18,6 +18,18 @@ help:
 	@echo "Available targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: up
+up: ## Build and start the whole stack (3 replicas, Postgres, Keycloak, LocalStack)
+	docker compose up --build -d
+
+.PHONY: down
+down: ## Stop the stack, keeping the database volume
+	docker compose down
+
+.PHONY: compose-migrate-down
+compose-migrate-down: ## Revert the last migration inside the compose network
+	docker compose run --rm --no-deps migrate /app/migrate down
+
 .PHONY: test
 test: ## Run tests
 	$(GO) test ./... -count=1 -v ./... -race
