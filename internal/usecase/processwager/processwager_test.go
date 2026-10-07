@@ -637,3 +637,83 @@ func TestPayloadHash(t *testing.T) {
 		}
 	})
 }
+
+func TestInbox(t *testing.T) {
+	ctx := context.Background()
+	inbox := func(id, hash string) *usecase.InboxMessage {
+		return &usecase.InboxMessage{Consumer: "wager-transactions", MessageID: id, Hash: []byte(hash)}
+	}
+
+	tests := []struct {
+		name       string
+		first      *usecase.InboxMessage
+		second     *usecase.InboxMessage
+		secondSpec spec
+		wantErr    error
+		wantReplay bool
+		wantLedger int
+		wantInbox  int
+	}{
+		{
+			name: "redelivery of a handled message does not touch the wallet", first: inbox("m1", "h1"), second: inbox("m1", "h1"),
+			secondSpec: spec{ext: "b1", kind: "BET", minor: 2500}, wantReplay: true, wantLedger: 1, wantInbox: 1,
+		},
+		{
+			name: "redelivery is absorbed even when the operation would be new", first: inbox("m1", "h1"), second: inbox("m1", "h1"),
+			secondSpec: spec{ext: "b2", kind: "BET", minor: 2500}, wantReplay: true, wantLedger: 1, wantInbox: 1,
+		},
+		{
+			name: "same message id with another hash is rejected and stores nothing", first: inbox("m1", "h1"), second: inbox("m1", "h2"),
+			secondSpec: spec{ext: "b2", kind: "BET", minor: 2500}, wantErr: usecase.ErrInboxHashMismatch, wantLedger: 1, wantInbox: 1,
+		},
+		{
+			name: "another message with the same operation replays through the idempotency key", first: inbox("m1", "h1"), second: inbox("m2", "h1"),
+			secondSpec: spec{ext: "b1", kind: "BET", minor: 2500}, wantReplay: true, wantLedger: 1, wantInbox: 2,
+		},
+		{
+			name: "without inbox the operation is still idempotent", first: inbox("m1", "h1"), second: nil,
+			secondSpec: spec{ext: "b1", kind: "BET", minor: 2500}, wantReplay: true, wantLedger: 1, wantInbox: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 100000)
+			in := h.input(spec{ext: "b1", kind: "BET", minor: 2500})
+			in.Inbox = tt.first
+			if _, err := h.uc.Execute(ctx, in); err != nil {
+				t.Fatal(err)
+			}
+
+			in = h.input(tt.secondSpec)
+			in.Inbox = tt.second
+			out, err := h.uc.Execute(ctx, in)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if err == nil && out.Replay != tt.wantReplay {
+				t.Fatalf("replay = %v, want %v", out.Replay, tt.wantReplay)
+			}
+			if len(h.store.ledger) != tt.wantLedger || len(h.store.inbox) != tt.wantInbox {
+				t.Fatalf("ledger = %d, inbox = %d, want %d and %d", len(h.store.ledger), len(h.store.inbox), tt.wantLedger, tt.wantInbox)
+			}
+		})
+	}
+
+	t.Run("a failed unit of work leaves no inbox row, so the redelivery is processed", func(t *testing.T) {
+		h := newHarness(t, 100000)
+		h.store.outboxErr = errors.New("outbox down")
+		in := h.input(spec{ext: "b1", kind: "BET", minor: 2500})
+		in.Inbox = inbox("m1", "h1")
+		if _, err := h.uc.Execute(ctx, in); err == nil {
+			t.Fatal("want an error")
+		}
+		if len(h.store.inbox) != 0 || len(h.store.ledger) != 0 {
+			t.Fatalf("inbox = %d, ledger = %d after rollback", len(h.store.inbox), len(h.store.ledger))
+		}
+		h.store.outboxErr = nil
+		out, err := h.uc.Execute(ctx, in)
+		if err != nil || out.Replay || out.Status != wager.StatusProcessed || len(h.store.ledger) != 1 {
+			t.Fatalf("out = %+v, %v, ledger = %d", out, err, len(h.store.ledger))
+		}
+	})
+}
