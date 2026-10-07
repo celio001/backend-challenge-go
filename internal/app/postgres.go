@@ -20,6 +20,7 @@ var PostgresModule = fx.Module("postgres",
 		fx.Annotate(postgres.NewUnitOfWork, fx.As(new(usecase.UnitOfWork))),
 		fx.Annotate(func(p *pgxpool.Pool) *postgres.WalletReader { return postgres.NewWalletReader(p) }, fx.As(new(queries.WalletReader))),
 		fx.Annotate(func(p *pgxpool.Pool) *postgres.LedgerReader { return postgres.NewLedgerReader(p) }, fx.As(new(queries.LedgerReader))),
+		fx.Annotate(func(p *pgxpool.Pool) *postgres.TransactionReader { return postgres.NewTransactionReader(p) }, fx.As(new(queries.TransactionReader))),
 	),
 )
 
