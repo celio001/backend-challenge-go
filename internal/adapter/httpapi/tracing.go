@@ -12,9 +12,8 @@ import (
 
 const tracerName = "github.com/celio001/backend-challenge-go/adapter/httpapi"
 
-// traced opens a server span for one route. The route pattern is the span name, never the URL: ids in paths would give
-// every request a name of its own. A traceparent header from the caller becomes the parent, so the trace continues.
-// Nothing from the body, the token or the query reaches the span.
+// traced opens a server span per route, named by the route pattern (a URL would give every request its own name), and continues
+// the caller's traceparent. Nothing from the body, the token or the query reaches the span.
 func traced(pattern string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
