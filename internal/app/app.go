@@ -22,6 +22,7 @@ var Module = fx.Options(
 		func() *slog.Logger { return slog.New(slog.NewJSONHandler(os.Stdout, nil)) },
 	),
 	SystemModule,
+	ObservabilityModule,
 	PostgresModule,
 	OIDCModule,
 	SQSModule,
@@ -29,6 +30,7 @@ var Module = fx.Options(
 	HTTPModule,
 	OutboxModule,
 	ConsumerModule,
+	RefWorkerModule,
 )
 
 // Fx wiring events are debug noise in production; its failures still surface at error level.
