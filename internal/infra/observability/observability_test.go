@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/celio001/backend-challenge-go/internal/domain/money"
 	"github.com/celio001/backend-challenge-go/internal/domain/wager"
 	"github.com/celio001/backend-challenge-go/internal/domain/wallet"
+	"github.com/celio001/backend-challenge-go/internal/testutil/spantest"
 	"github.com/celio001/backend-challenge-go/internal/usecase"
 	"github.com/celio001/backend-challenge-go/internal/usecase/processwager"
 	"github.com/celio001/backend-challenge-go/internal/usecase/reconcile"
@@ -275,5 +278,90 @@ func TestEveryDocumentedMetricIsRegistered(t *testing.T) {
 		if !strings.Contains(body, "\n"+name) && !strings.HasPrefix(body, name) {
 			t.Errorf("metric %s is not exposed", name)
 		}
+	}
+}
+
+func TestInstrumentOpensASpanWithTheOperationsIdentifiersAndNeverItsAmount(t *testing.T) {
+	brl, _ := money.FromMinor(123456, money.BRL)
+	base := processwager.Input{
+		ProviderID: "provider-a", WalletID: "w-1", Kind: "BET", CorrelationID: "corr-1", Money: brl,
+		Inbox: &usecase.InboxMessage{Consumer: "wager-transactions", MessageID: "msg-9"},
+	}
+	tests := []struct {
+		name      string
+		out       processwager.Output
+		err       error
+		wantError bool
+		want      map[string]string
+	}{
+		{
+			name: "an outcome", out: processwager.Output{TransactionID: "t-1", Status: wager.StatusRejected, FailureCode: wager.CodeInsufficientFunds},
+			want: map[string]string{"wager.channel": "sqs", "wager.kind": "BET", "provider.id": "provider-a", "wallet.id": "w-1", "correlation.id": "corr-1", "messaging.message.id": "msg-9", "transaction.id": "t-1", "wager.status": "REJECTED", "wager.failure_code": "INSUFFICIENT_FUNDS", "wager.replay": "false"},
+		},
+		{name: "a replay", out: processwager.Output{TransactionID: "t-1", Status: wager.StatusProcessed, Replay: true}, want: map[string]string{"wager.replay": "true", "wager.status": "PROCESSED"}},
+		{name: "a refusal is an answer, not a failure", err: fmt.Errorf("%w: bad", processwager.ErrValidation), want: map[string]string{"wager.error_class": "VALIDATION"}},
+		{name: "a conflict is an answer, not a failure", err: processwager.ErrIdempotencyKeyReused, want: map[string]string{"wager.error_class": "CONFLICT"}},
+		{name: "a transient failure is a span error", err: fmt.Errorf("%w: db", usecase.ErrTransient), wantError: true, want: map[string]string{"wager.error_class": "TRANSIENT"}},
+		{name: "an unexpected failure is a span error", err: errors.New("boom"), wantError: true, want: map[string]string{"wager.error_class": "INTERNAL"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := spantest.Install(t)
+			m, _ := newMetrics(t)
+			p := m.Instrument("sqs", fakeProcess{out: tt.out, err: tt.err}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+			_, _ = p.Execute(context.Background(), base)
+
+			spans := rec.Named("wager.execute")
+			if len(spans) != 1 {
+				t.Fatalf("spans = %d", len(spans))
+			}
+			attrs := spantest.Attrs(spans[0])
+			for k, v := range tt.want {
+				if attrs[k] != v {
+					t.Fatalf("attribute %s = %q, want %q (all: %v)", k, attrs[k], v, attrs)
+				}
+			}
+			if (spans[0].Status().Code == codes.Error) != tt.wantError {
+				t.Fatalf("status = %v, want error = %v", spans[0].Status(), tt.wantError)
+			}
+			for k, v := range attrs {
+				if strings.Contains(v, "1234.56") || strings.Contains(v, "123456") || strings.Contains(k, "amount") || strings.Contains(k, "money") {
+					t.Fatalf("the span carries the amount: %s=%s", k, v)
+				}
+			}
+		})
+	}
+}
+
+func TestInstrumentSpanIsAChildOfTheCallersAndItsTraceIdReachesTheLog(t *testing.T) {
+	rec := spantest.Install(t)
+	m, _ := newMetrics(t)
+	var buf bytes.Buffer
+	p := m.Instrument("http", fakeProcess{out: processwager.Output{TransactionID: "t-1", Status: wager.StatusProcessed}}, slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	ctx, parent := otel.Tracer("test").Start(context.Background(), "request")
+	_, _ = p.Execute(ctx, processwager.Input{ProviderID: "provider-a", WalletID: "w-1", Kind: "BET"})
+	parent.End()
+
+	spans := rec.Named("wager.execute")
+	if len(spans) != 1 || spans[0].Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatalf("the use case span is not a child of the request span")
+	}
+	var line map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatal(err)
+	}
+	if line["traceId"] != parent.SpanContext().TraceID().String() {
+		t.Fatalf("log traceId = %v, want %s", line["traceId"], parent.SpanContext().TraceID())
+	}
+}
+
+func TestWithoutATracerTheLogHasNoTraceId(t *testing.T) {
+	var buf bytes.Buffer
+	m, _ := newMetrics(t)
+	p := m.Instrument("http", fakeProcess{out: processwager.Output{Status: wager.StatusProcessed}}, slog.New(slog.NewJSONHandler(&buf, nil)))
+	_, _ = p.Execute(context.Background(), processwager.Input{ProviderID: "provider-a", WalletID: "w-1", Kind: "BET"})
+	if strings.Contains(buf.String(), "traceId") {
+		t.Fatalf("a traceId was logged although tracing is off: %s", buf.String())
 	}
 }
