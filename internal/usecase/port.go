@@ -31,6 +31,12 @@ type TransactionRepository interface {
 	ProcessedReversalOf(ctx context.Context, refID wallet.TxID) (*wager.Transaction, error)
 	// Update persists the state of a transaction that was inserted earlier; nextAttemptAt is only used while waiting for a reference.
 	Update(ctx context.Context, t *wager.Transaction, nextAttemptAt time.Time) error
+	// LockPending reads a PENDING_REFERENCE transaction and holds its row; wager.ErrNotFound if it is no longer pending.
+	LockPending(ctx context.Context, id wallet.TxID) (*wager.Transaction, error)
+	// Reschedule counts one more attempt and sets the next one delay from now, on the database clock.
+	Reschedule(ctx context.Context, id wallet.TxID, delay time.Duration) error
+	// WakeWaiting makes the pending transactions that wait for this external id due now. It skips rows another replica is working on.
+	WakeWaiting(ctx context.Context, providerID, externalID string) error
 }
 
 type LedgerRepository interface {
