@@ -43,3 +43,4 @@ func (r repos) Wallets() usecase.WalletRepository           { return NewWalletRe
 func (r repos) Transactions() usecase.TransactionRepository { return NewTransactionRepository(r.tx) }
 func (r repos) Ledger() usecase.LedgerRepository            { return NewLedgerRepository(r.tx) }
 func (r repos) Outbox() usecase.OutboxWriter                { return NewOutboxWriter(r.tx) }
+func (r repos) Inbox() usecase.InboxRepository              { return NewInboxRepository(r.tx) }
