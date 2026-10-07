@@ -10,7 +10,9 @@ import (
 	"strings"
 
 	"github.com/celio001/backend-challenge-go/internal/domain/money"
+	"github.com/celio001/backend-challenge-go/internal/domain/wager"
 	"github.com/celio001/backend-challenge-go/internal/domain/wallet"
+	"github.com/celio001/backend-challenge-go/internal/usecase"
 	"github.com/celio001/backend-challenge-go/internal/usecase/openwallet"
 	"github.com/celio001/backend-challenge-go/internal/usecase/queries"
 )
@@ -127,6 +129,11 @@ func (h walletHandlers) ledger(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h walletHandlers) writeError(w http.ResponseWriter, r *http.Request, err error) {
+	writeError(h.log, w, r, err)
+}
+
+// writeError maps domain and use case errors to the HTTP contract; routes with their own mapping handle those errors first.
+func writeError(log *slog.Logger, w http.ResponseWriter, r *http.Request, err error) {
 	var tooLarge *http.MaxBytesError
 	switch {
 	case errors.Is(err, wallet.ErrAlreadyExists):
@@ -145,15 +152,18 @@ func (h walletHandlers) writeError(w http.ResponseWriter, r *http.Request, err e
 		writeProblem(w, errInvalidRequest.with("request body too large"))
 	case isDecodeError(err):
 		writeProblem(w, errInvalidRequest)
+	case errors.Is(err, usecase.ErrTransient):
+		log.Warn("transient failure", "correlationId", correlationIDFrom(r.Context()), "method", r.Method, "path", r.URL.Path, "error", err)
+		writeProblem(w, errUnavailable)
 	default:
-		h.log.Error("request failed", "correlationId", correlationIDFrom(r.Context()), "method", r.Method, "path", r.URL.Path, "error", err)
+		log.Error("request failed", "correlationId", correlationIDFrom(r.Context()), "method", r.Method, "path", r.URL.Path, "error", err)
 		writeProblem(w, errInternal)
 	}
 }
 
 var moneyErrors = []error{
 	money.ErrUninitialized, money.ErrInvalidAmount, money.ErrInvalidCurrency,
-	money.ErrOverflow, money.ErrNegative, money.ErrNotPositive,
+	money.ErrOverflow, money.ErrNegative, money.ErrNotPositive, wager.ErrLossMustBeZero,
 }
 
 func isMoneyError(err error) bool {
