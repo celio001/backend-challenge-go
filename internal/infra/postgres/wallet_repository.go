@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -14,7 +15,8 @@ import (
 const uniqueViolation = "23505"
 
 type WalletRepository struct {
-	db dbtx
+	db       dbtx
+	lockWait func(time.Duration)
 }
 
 func NewWalletRepository(db dbtx) *WalletRepository {
@@ -44,6 +46,10 @@ func (r *WalletRepository) ByID(ctx context.Context, id wallet.WalletID) (*walle
 // with the FOR KEY SHARE that foreign keys take when inserting transactions. With FOR UPDATE, two operations that had
 // inserted their transaction and then asked for the lock would each wait on the other's key share (deadlock).
 func (r *WalletRepository) Lock(ctx context.Context, id wallet.WalletID) (*wallet.Wallet, error) {
+	if r.lockWait != nil {
+		start := time.Now()
+		defer func() { r.lockWait(time.Since(start)) }()
+	}
 	return loadWallet(ctx, r.db, id, " FOR NO KEY UPDATE")
 }
 
