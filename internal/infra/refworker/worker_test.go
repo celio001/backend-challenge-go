@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/celio001/backend-challenge-go/internal/domain/wager"
 	"github.com/celio001/backend-challenge-go/internal/domain/wallet"
+	"github.com/celio001/backend-challenge-go/internal/testutil/spantest"
 	"github.com/celio001/backend-challenge-go/internal/usecase/resolvereference"
 )
 
@@ -178,5 +181,38 @@ func TestRunKeepsPollingAndStopsWithTheContext(t *testing.T) {
 	case <-finished:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+}
+
+func TestEachResolutionAttemptHasASpan(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantError bool
+		wantState string
+	}{
+		{name: "an attempt that settles the transaction", wantState: "PROCESSED"},
+		{name: "an attempt that fails is a span error", err: errors.New("db down"), wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := spantest.Install(t)
+			store := &fakeStore{queue: pendings("a")}
+			res := &fakeResolver{errFor: map[string]error{"tx-a": tt.err}}
+			if _, err := New(store, res, Config{}, quiet()).RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			spans := rec.Named("pending_reference.resolve")
+			if len(spans) != 1 {
+				t.Fatalf("spans = %d", len(spans))
+			}
+			attrs := spantest.Attrs(spans[0])
+			if attrs["transaction.id"] != "tx-a" || attrs["wallet.id"] != "w" || attrs["wager.status"] != tt.wantState {
+				t.Fatalf("attributes = %v", attrs)
+			}
+			if (spans[0].Status().Code == codes.Error) != tt.wantError {
+				t.Fatalf("status = %v", spans[0].Status())
+			}
+		})
 	}
 }
