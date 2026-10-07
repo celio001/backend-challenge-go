@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +13,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/celio001/backend-challenge-go/pkg/backoff"
 	"github.com/celio001/backend-challenge-go/pkg/faultinject"
@@ -34,6 +40,11 @@ type Message struct {
 	SenderID     string
 	ReceiveCount int
 }
+
+const tracerName = "github.com/celio001/backend-challenge-go/sqs"
+
+// traceAttributes are the message attributes a sender may use to continue its trace through the queue.
+var traceAttributes = []string{"traceparent", "tracestate"}
 
 type Verdict struct {
 	Action Action
@@ -175,9 +186,10 @@ func (c *Consumer) Run(ctx context.Context) {
 
 func (c *Consumer) receive(ctx context.Context) ([]types.Message, error) {
 	out, err := c.api.ReceiveMessage(ctx, &awssqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(c.cfg.QueueURL),
-		MaxNumberOfMessages: 10,
-		WaitTimeSeconds:     int32(c.cfg.WaitTime.Seconds()),
+		QueueUrl:              aws.String(c.cfg.QueueURL),
+		MaxNumberOfMessages:   10,
+		WaitTimeSeconds:       int32(c.cfg.WaitTime.Seconds()),
+		MessageAttributeNames: traceAttributes,
 		MessageSystemAttributeNames: []types.MessageSystemAttributeName{
 			types.MessageSystemAttributeNameSenderId,
 			types.MessageSystemAttributeNameApproximateReceiveCount,
@@ -236,9 +248,23 @@ func (c *Consumer) processOne(work context.Context, m types.Message) Action {
 	}
 	msg.ReceiveCount, _ = strconv.Atoi(m.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)])
 
+	// The sender's trace, when it sent one, is the parent; otherwise the message starts a trace of its own.
+	carrier := propagation.MapCarrier{}
+	for _, name := range traceAttributes {
+		if v, ok := m.MessageAttributes[name]; ok && v.StringValue != nil {
+			carrier[name] = *v.StringValue
+		}
+	}
+	ctx, span := otel.Tracer(tracerName).Start(otel.GetTextMapPropagator().Extract(work, carrier), "sqs.process", trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "aws_sqs"), attribute.String("messaging.message.id", msg.ID),
+			attribute.String("messaging.destination.name", queueName(c.cfg.QueueURL)), attribute.Int("messaging.sqs.receive_count", msg.ReceiveCount),
+		))
+
 	stopBeat := c.heartbeat(m)
-	v := c.handler.Handle(work, msg)
+	v := c.handler.Handle(ctx, msg)
 	stopBeat()
+	endMessageSpan(span, v)
 	if v.Action != Retry {
 		// The outcome is durable (or final) but the message is still on the queue: the worst moment to die.
 		faultinject.Hit("after_commit_before_sqs_delete")
@@ -279,6 +305,39 @@ func (c *Consumer) processOne(work context.Context, m types.Message) Action {
 		log.Warn("message will be retried", "delay", delay, "error", v.Err)
 	}
 	return v.Action
+}
+
+func queueName(url string) string {
+	if i := strings.LastIndex(url, "/"); i >= 0 {
+		return url[i+1:]
+	}
+	return url
+}
+
+// endMessageSpan records what became of the message. A dead letter is a decision the service made, not a failure of the
+// service; only a message that must be retried, with the reason it could not be finished, is a span error.
+func endMessageSpan(span trace.Span, v Verdict) {
+	span.SetAttributes(attribute.String("messaging.outcome", outcomeName(v.Action)))
+	if v.Code != "" {
+		span.SetAttributes(attribute.String("messaging.failure_code", v.Code))
+	}
+	if v.Action == Retry {
+		if v.Err != nil {
+			span.RecordError(v.Err)
+		}
+		span.SetStatus(codes.Error, "will be retried")
+	}
+	span.End()
+}
+
+func outcomeName(a Action) string {
+	switch a {
+	case Delete:
+		return "delete"
+	case DeadLetter:
+		return "dead_letter"
+	}
+	return "retry"
 }
 
 func (c *Consumer) observe(outcome string) {
