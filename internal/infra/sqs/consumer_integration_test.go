@@ -14,8 +14,11 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/celio001/backend-challenge-go/internal/infra/sqs"
+	"github.com/celio001/backend-challenge-go/internal/testutil/spantest"
 	"github.com/celio001/backend-challenge-go/internal/testutil/sqstest"
 )
 
@@ -138,6 +141,35 @@ func TestConsumerAgainstLocalStack(t *testing.T) {
 		}
 		if left := q.Drain(t); len(left) != 0 {
 			t.Fatalf("%d messages left on the queue", len(left))
+		}
+	})
+
+	t.Run("a traceparent sent as a message attribute continues the trace inside the handler", func(t *testing.T) {
+		spantest.Install(t)
+		q, dlq := sqstest.New(t), sqstest.New(t)
+		const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+		if _, err := q.Client.SendMessage(context.Background(), &awssqs.SendMessageInput{
+			QueueUrl: aws.String(q.URL), MessageBody: aws.String("payload"), MessageGroupId: aws.String("wallet-1"), MessageDeduplicationId: aws.String("traced-1"),
+			MessageAttributes: map[string]types.MessageAttributeValue{
+				"traceparent": {DataType: aws.String("String"), StringValue: aws.String("00-" + traceID + "-00f067aa0ba902b7-01")},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		got := make(chan string, 1)
+		startConsumer(t, q, dlq, handlerFunc(func(ctx context.Context, m sqs.Message) sqs.Verdict {
+			got <- trace.SpanContextFromContext(ctx).TraceID().String()
+			return sqs.Verdict{Action: sqs.Delete}
+		}), nil)
+
+		select {
+		case id := <-got:
+			if id != traceID {
+				t.Fatalf("the handler ran in trace %s, want the sender's %s", id, traceID)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("the message was not handled")
 		}
 	})
 
