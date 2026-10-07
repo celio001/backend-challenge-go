@@ -108,10 +108,13 @@ func TestEndToEnd(t *testing.T) {
 	kc := keycloakURL(t)
 	pool, dbURL := pgtest.New(t)
 	events := sqstest.New(t)
+	inbound, inboundDLQ := sqstest.NewInbound(t, 30)
 	addr := freeAddr(t)
 	t.Setenv("HTTP_ADDR", addr)
 	t.Setenv("SQS_ENDPOINT", os.Getenv("TEST_SQS_ENDPOINT"))
 	t.Setenv("EVENTS_QUEUE_NAME", events.Name)
+	t.Setenv("WAGER_QUEUE_NAME", inbound.Name)
+	t.Setenv("WAGER_DLQ_NAME", inboundDLQ.Name)
 	t.Setenv("DATABASE_URL", dbURL)
 	t.Setenv("OIDC_ISSUER", kc+"/realms/wallet")
 	t.Setenv("OIDC_DISCOVERY_URL", "")
@@ -170,7 +173,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("headers = %v", r.header)
 		}
 		for _, typ := range []string{"WagerTransactionProcessed", "WalletBalanceChanged"} {
-			if n := count(`SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND event_type = $2 AND payload->>'correlationId' = 'e2e-corr-1'`, walletID, typ); n != 1 {
+			if n := count(`SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND event_type = $2 AND payload::jsonb->>'correlationId' = 'e2e-corr-1'`, walletID, typ); n != 1 {
 				t.Fatalf("%s events with the request correlation id = %d", typ, n)
 			}
 		}
@@ -422,7 +425,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("live: status = %d, body = %v", r.status, r.body)
 		}
 		checks, _ := call(t, http.MethodGet, base+"/health/ready", "", "", "").body["checks"].(map[string]any)
-		if r := call(t, http.MethodGet, base+"/health/ready", "", "", ""); r.status != http.StatusOK || checks["postgres"] != "up" || checks["sqs"] != "up" {
+		if r := call(t, http.MethodGet, base+"/health/ready", "", "", ""); r.status != http.StatusOK || checks["postgres"] != "up" || checks["sqs"] != "up" || checks["sqs-inbound"] != "up" {
 			t.Fatalf("ready: status = %d, body = %v", r.status, r.body)
 		}
 	})
