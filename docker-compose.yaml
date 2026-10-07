@@ -1,83 +1,114 @@
+x-app: &app
+  image: wallet-service:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: &app-env
+    HTTP_ADDR: ":8081"
+    DATABASE_URL: postgres://wallet_app:${WALLET_APP_PASSWORD:-wallet_app}@postgres:5432/challenge?sslmode=disable
+    OIDC_ISSUER: http://localhost:8080/realms/wallet
+    OIDC_DISCOVERY_URL: http://keycloak:8080/realms/wallet
+    OIDC_AUDIENCE: wallet-api
+  networks:
+    - backend-challenge-go
+  depends_on: &app-deps
+    migrate:
+      condition: service_completed_successfully
+    keycloak:
+      condition: service_healthy
+    localstack:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/health/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 5s
+
 services:
   backend-challenge-1:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: backend-challenge-1
+    <<: *app
     ports:
       - "8081:8081"
-    networks:
-      - backend-challenge-go
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health/ready"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   backend-challenge-2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: backend-challenge-2
+    <<: *app
     ports:
       - "8082:8081"
-    networks:
-      - backend-challenge-go
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/health/ready"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    depends_on:
-      postgres:
-        condition: service_healthy
+
   backend-challenge-3:
+    <<: *app
+    ports:
+      - "8083:8081"
+
+  migrate:
+    image: wallet-service:local
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: backend-challenge-3
-    ports:
-      - "8083:8081"
+    command: ["/app/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://wallet_owner:${WALLET_OWNER_PASSWORD:-wallet_owner}@postgres:5432/challenge?sslmode=disable
     networks:
       - backend-challenge-go
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/health/ready"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+
+  db-init:
+    image: postgres:18-alpine
+    entrypoint: ["psql"]
+    command:
+      - -h
+      - postgres
+      - -U
+      - postgres
+      - -d
+      - challenge
+      - -v
+      - ON_ERROR_STOP=1
+      - -v
+      - owner_password=${WALLET_OWNER_PASSWORD:-wallet_owner}
+      - -v
+      - app_password=${WALLET_APP_PASSWORD:-wallet_app}
+      - -f
+      - /init/db-init.sql
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ./deploy/db-init.sql:/init/db-init.sql:ro
+    networks:
+      - backend-challenge-go
     depends_on:
       postgres:
         condition: service_healthy
 
   postgres:
     image: postgres:18-alpine
-    container_name: challenge-postgres
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: challenge
     volumes:
       - db_data:/var/lib/postgresql
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     networks:
       - backend-challenge-go
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d challenge"]
       interval: 5s
       timeout: 5s
       retries: 5
-  
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
-    container_name: keycloak
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      # Tokens carry iss=localhost:8080 whichever address the caller used; backchannel URLs (jwks) follow the caller's host.
       KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HTTP_ENABLED: "true"
       KC_HEALTH_ENABLED: "true"
     command: start-dev --import-realm
@@ -94,21 +125,24 @@ services:
       retries: 30
       start_period: 20s
 
-  Localstack:
-    image: localstack/localstack:2.2
-    container_name: localstack
+  localstack:
+    image: localstack/localstack:3.8
     environment:
-      - SERVICES=s3
-      - DEBUG=1
-      - DATA_DIR=/tmp/localstack/data
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./deploy/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
     ports:
       - "4566:4566"
-      - "4571:4571"
     networks:
       - backend-challenge-go
-    volumes:
-      - ./localstack:/tmp/localstack
-      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
 volumes:
   db_data:
 
