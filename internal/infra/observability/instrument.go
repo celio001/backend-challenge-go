@@ -6,6 +6,11 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/celio001/backend-challenge-go/internal/domain/money"
 	"github.com/celio001/backend-challenge-go/internal/domain/wallet"
 	"github.com/celio001/backend-challenge-go/internal/usecase"
@@ -31,6 +36,17 @@ type instrumented struct {
 }
 
 func (i *instrumented) Execute(ctx context.Context, in processwager.Input) (processwager.Output, error) {
+	spanAttrs := []attribute.KeyValue{
+		attribute.String("wager.channel", i.channel), attribute.String("wager.kind", in.Kind),
+		attribute.String("provider.id", in.ProviderID), attribute.String("wallet.id", in.WalletID),
+		attribute.String("correlation.id", in.CorrelationID),
+	}
+	if in.Inbox != nil {
+		spanAttrs = append(spanAttrs, attribute.String("messaging.message.id", in.Inbox.MessageID))
+	}
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "wager.execute", trace.WithAttributes(spanAttrs...))
+	defer span.End()
+
 	start := time.Now()
 	out, err := i.next.Execute(ctx, in)
 	elapsed := time.Since(start)
@@ -44,9 +60,18 @@ func (i *instrumented) Execute(ctx context.Context, in processwager.Input) (proc
 	if in.Inbox != nil {
 		attrs = append(attrs, "messageId", in.Inbox.MessageID)
 	}
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		attrs = append(attrs, "traceId", sc.TraceID().String())
+	}
 
 	if err != nil {
 		class := errorClass(err)
+		span.SetAttributes(attribute.String("wager.error_class", class))
+		// A refusal or a conflict is an answer the service gave on purpose; only failures of the service itself are span errors.
+		if class == classTransient || class == classInternal {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, class)
+		}
 		i.m.transactions.WithLabelValues(i.channel, in.Kind, "ERROR", class).Inc()
 		if reason := conflictReason(err); reason != "" {
 			i.m.conflicts.WithLabelValues(reason).Inc()
@@ -58,6 +83,10 @@ func (i *instrumented) Execute(ctx context.Context, in processwager.Input) (proc
 		return out, err
 	}
 
+	span.SetAttributes(
+		attribute.String("transaction.id", out.TransactionID), attribute.String("wager.status", string(out.Status)),
+		attribute.String("wager.failure_code", string(out.FailureCode)), attribute.Bool("wager.replay", out.Replay),
+	)
 	i.m.transactions.WithLabelValues(i.channel, in.Kind, string(out.Status), string(out.FailureCode)).Inc()
 	if out.Replay {
 		i.m.replays.WithLabelValues(i.channel).Inc()
@@ -69,6 +98,8 @@ func (i *instrumented) Execute(ctx context.Context, in processwager.Input) (proc
 	i.log.InfoContext(ctx, "wager transaction handled", attrs...)
 	return out, nil
 }
+
+const tracerName = "github.com/celio001/backend-challenge-go/observability"
 
 const (
 	classValidation = "VALIDATION"
