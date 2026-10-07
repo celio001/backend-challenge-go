@@ -30,6 +30,9 @@ type Config struct {
 	WagerDLQURL    string
 	// SenderProviders maps the SQS SenderId (the broker's view of who sent) to the provider it may act as.
 	SenderProviders map[string]string
+	// OutboxLease and ReferenceLease are how long a replica keeps the work it claimed before another may take it over.
+	OutboxLease    time.Duration
+	ReferenceLease time.Duration
 }
 
 func LoadConfig(getenv func(string) string) (Config, error) {
@@ -58,6 +61,16 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("%w: REFERENCE_TTL must be a positive duration such as 10m", ErrInvalidConfig)
 	}
 	cfg.ReferenceTTL = ttl
+	for _, l := range []struct {
+		env, def string
+		dst      *time.Duration
+	}{{"OUTBOX_LEASE", "30s", &cfg.OutboxLease}, {"REFERENCE_LEASE", "30s", &cfg.ReferenceLease}} {
+		d, err := time.ParseDuration(withDefault(getenv(l.env), l.def))
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("%w: %s must be a positive duration such as 30s", ErrInvalidConfig, l.env)
+		}
+		*l.dst = d
+	}
 
 	var missing []string
 	if cfg.DatabaseURL == "" {
