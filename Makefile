@@ -28,9 +28,13 @@ up: ## Build and start the whole stack (3 replicas, Postgres, Keycloak, LocalSta
 up-tracing: ## Like `up`, plus Jaeger (UI on :16686) with every replica exporting its traces to it
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile tracing up --build -d
 
+.PHONY: up-observability
+up-observability: ## Like `up-tracing`, plus Prometheus (:9090), Loki, Alloy and Grafana (:3000, admin/admin) with the dashboards loaded
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile tracing --profile observability up --build -d
+
 .PHONY: down
 down: ## Stop the stack, keeping the database volume
-	docker compose --profile tracing down
+	docker compose --profile tracing --profile observability down
 
 .PHONY: compose-migrate-up
 compose-migrate-up: ## Apply the pending migrations inside the compose network
