@@ -10,6 +10,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/celio001/backend-challenge-go/internal/adapter/sqsmsg"
+	"github.com/celio001/backend-challenge-go/internal/infra/observability"
 	infrasqs "github.com/celio001/backend-challenge-go/internal/infra/sqs"
 )
 
@@ -23,7 +24,7 @@ type wagerConsumer struct {
 }
 
 // newWagerConsumer registers after the pool and the use case, so Fx stops it first: no message is half handled when they close.
-func newWagerConsumer(lc fx.Lifecycle, cfg Config, client *awssqs.Client, process sqsmsg.ProcessWager, log *slog.Logger) *wagerConsumer {
+func newWagerConsumer(lc fx.Lifecycle, cfg Config, client *awssqs.Client, process sqsmsg.ProcessWager, m *observability.Metrics, log *slog.Logger) *wagerConsumer {
 	w := &wagerConsumer{api: client}
 	if len(cfg.SenderProviders) == 0 {
 		log.Warn("SQS_SENDER_PROVIDER_MAP is empty: every inbound message will be dead-lettered")
@@ -48,7 +49,7 @@ func newWagerConsumer(lc fx.Lifecycle, cfg Config, client *awssqs.Client, proces
 			if err != nil {
 				return err
 			}
-			c := infrasqs.NewConsumer(client, handler, infrasqs.ConsumerConfig{QueueURL: queueURL, DLQURL: dlqURL}, log)
+			c := infrasqs.NewConsumer(client, handler, infrasqs.ConsumerConfig{QueueURL: queueURL, DLQURL: dlqURL, Observer: m}, log)
 			w.queueURL.Store(&queueURL)
 			w.consumer.Store(c)
 			go func() {
@@ -99,7 +100,7 @@ type verdictHandler struct{ h *sqsmsg.Handler }
 
 func (v verdictHandler) Handle(ctx context.Context, m infrasqs.Message) infrasqs.Verdict {
 	r := v.h.Handle(ctx, sqsmsg.Delivery{Body: m.Body, SenderID: m.SenderID})
-	verdict := infrasqs.Verdict{Code: r.Code, BusinessID: r.MessageID, Err: r.Err}
+	verdict := infrasqs.Verdict{Code: r.Code, BusinessID: r.MessageID, Replay: r.Replay, Err: r.Err}
 	switch r.Action {
 	case sqsmsg.Delete:
 		verdict.Action = infrasqs.Delete
