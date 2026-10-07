@@ -49,6 +49,8 @@ type Transaction struct {
 	failureCode   FailureCode
 	resultBalance money.Money
 	expiresAt     time.Time
+	attempts      int
+	nextAttemptAt time.Time
 }
 
 type ExternalInput struct {
@@ -140,8 +142,11 @@ type Snapshot struct {
 	ResultBalance         money.Money
 	CorrelationID         string
 	ExpiresAt             time.Time
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	// Attempts and NextAttemptAt are scheduling facts of PENDING_REFERENCE, restored for reading only.
+	Attempts      int
+	NextAttemptAt time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Rehydrate restores persisted state, validating it without replaying any transition.
@@ -177,6 +182,8 @@ func Rehydrate(s Snapshot) (*Transaction, error) {
 		failureCode:           s.FailureCode,
 		resultBalance:         s.ResultBalance,
 		expiresAt:             s.ExpiresAt.UTC(),
+		attempts:              s.Attempts,
+		nextAttemptAt:         s.NextAttemptAt.UTC(),
 	}
 	if err := t.validateIdentity(); err != nil {
 		return nil, err
@@ -312,6 +319,8 @@ func (t *Transaction) FailureCode() FailureCode      { return t.failureCode }
 func (t *Transaction) ResultBalance() money.Money    { return t.resultBalance }
 func (t *Transaction) CorrelationID() string         { return t.correlationID }
 func (t *Transaction) ExpiresAt() time.Time          { return t.expiresAt }
+func (t *Transaction) Attempts() int                 { return t.attempts }
+func (t *Transaction) NextAttemptAt() time.Time      { return t.nextAttemptAt }
 func (t *Transaction) CreatedAt() time.Time          { return t.createdAt }
 func (t *Transaction) UpdatedAt() time.Time          { return t.updatedAt }
 func (t *Transaction) IsTerminal() bool              { return t.status.IsTerminal() }
