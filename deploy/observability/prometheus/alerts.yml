@@ -1,0 +1,54 @@
+# Alert rules. There is no Alertmanager in this stack: they show in the Prometheus and Grafana UIs, nothing is notified.
+groups:
+  - name: wallet-service
+    rules:
+      - alert: WalletBalanceDiverged
+        # The counter goes up on every reconciliation that finds a divergence, so look at its increase, not its value.
+        expr: sum(increase(wallet_reconciliation_divergence_total[5m])) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: A wallet balance does not match its ledger
+          description: A reconciliation found a divergence in the last 5 minutes; the ERROR log "wallet balance diverges from its ledger" names the wallet.
+
+      - alert: ReplicaDown
+        expr: up{job="wallet-service"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Replica {{ $labels.instance }} is not answering the scrape"
+
+      - alert: OutboxFallingBehind
+        expr: max(outbox_oldest_pending_age_seconds) > 60
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: The oldest unpublished event is more than a minute old
+          description: Events are committed but not reaching the events queue; check the queue and the outbox.publish errors.
+
+      - alert: DeadLetters
+        expr: sum(increase(sqs_messages_total{outcome=~"dead_lettered|dead_letter_failed"}[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Messages are being sent to the dead-letter queue
+          description: Look at the failureCode attribute of the messages in wager-transactions-dlq.fifo.
+
+      - alert: InboundQueueUnreadable
+        expr: sum(increase(sqs_receive_errors_total[5m])) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: A replica cannot read the inbound queue
+
+      - alert: DatabaseAskingToRetry
+        expr: sum(rate(db_tx_retries_total[5m])) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: The database keeps asking transactions to be retried (deadlocks, timeouts or lost connections)
+
+      - alert: ServiceFailures
+        expr: sum(rate(wager_transactions_total{status="ERROR", failure_code=~"TRANSIENT|INTERNAL"}[5m])) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Operations are failing for reasons that are not the caller's
