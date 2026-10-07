@@ -19,6 +19,7 @@ import (
 	"github.com/celio001/backend-challenge-go/internal/usecase/openwallet"
 	"github.com/celio001/backend-challenge-go/internal/usecase/processwager"
 	"github.com/celio001/backend-challenge-go/internal/usecase/queries"
+	"github.com/celio001/backend-challenge-go/internal/usecase/reconcile"
 )
 
 const (
@@ -116,25 +117,40 @@ func (f *fakeTxQueries) ProviderTransaction(context.Context, string, string) (*w
 	return f.tx, f.err
 }
 
+type fakeReconciler struct {
+	calls  int
+	gotID  string
+	report reconcile.Report
+	err    error
+}
+
+func (f *fakeReconciler) Execute(_ context.Context, id string) (reconcile.Report, error) {
+	f.calls++
+	f.gotID = id
+	return f.report, f.err
+}
+
 type env struct {
-	h       http.Handler
-	open    *fakeOpen
-	queries *fakeQueries
-	process *fakeProcess
-	txq     *fakeTxQueries
+	reconcile *fakeReconciler
+	h         http.Handler
+	open      *fakeOpen
+	queries   *fakeQueries
+	process   *fakeProcess
+	txq       *fakeTxQueries
 }
 
 func newEnv(t *testing.T) env {
 	t.Helper()
 	e := env{
 		open: &fakeOpen{w: testWallet(t, 100000, 1)}, queries: &fakeQueries{w: testWallet(t, 97500, 2)},
-		process: &fakeProcess{}, txq: &fakeTxQueries{},
+		process: &fakeProcess{}, txq: &fakeTxQueries{}, reconcile: &fakeReconciler{},
 	}
 	e.h = New(Deps{
 		OpenWallet:   e.open,
 		ProcessWager: e.process,
 		Queries:      e.queries,
 		TxQueries:    e.txq,
+		Reconcile:    e.reconcile,
 		Verifier: fakeVerifier{
 			"admin":       {Subject: "svc", Roles: []string{auth.RoleWalletAdmin}},
 			"provider":    {Subject: "prov", ProviderID: "provider-a", Roles: []string{auth.RoleWagerWrite, auth.RoleWagerRead}},
