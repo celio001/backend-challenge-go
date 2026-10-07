@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/celio001/backend-challenge-go/pkg/backoff"
+	"github.com/celio001/backend-challenge-go/pkg/faultinject"
 )
 
 type Message struct {
@@ -43,6 +44,19 @@ type Config struct {
 	BackoffMax     time.Duration
 	// StuckAfter is the attempt count from which an event is logged as an error, so it can raise an alert.
 	StuckAfter int
+	// Observer is optional.
+	Observer Observer
+}
+
+// Results reported to the Observer.
+const (
+	ResultPublished = "published"
+	ResultFailed    = "failed"
+	ResultLeaseLost = "lease_lost"
+)
+
+type Observer interface {
+	Attempt(result string)
 }
 
 func (c Config) withDefaults() Config {
@@ -122,11 +136,16 @@ func (w *Worker) relay(ctx context.Context, m Message) {
 	pctx, cancel := context.WithTimeout(bg, w.cfg.PublishTimeout)
 	err := w.pub.Publish(pctx, m)
 	cancel()
+	if err == nil {
+		// The event is at the broker but the row still says unpublished: another replica must send it again.
+		faultinject.Hit("after_publish_before_mark")
+	}
 
 	mctx, cancelMark := context.WithTimeout(bg, 5*time.Second)
 	defer cancelMark()
 
 	if err != nil {
+		w.observe(ResultFailed)
 		retryIn := backoff.Delay(m.Attempts, w.cfg.BackoffBase, w.cfg.BackoffMax, 0.2)
 		level := slog.LevelWarn
 		if m.Attempts+1 >= w.cfg.StuckAfter {
@@ -145,7 +164,16 @@ func (w *Worker) relay(ctx context.Context, m Message) {
 		// The event is out but still unmarked: it will be relayed again with the same id, which consumers discard.
 		w.log.Warn("published but could not mark; it will be sent again", "eventId", m.ID, "error", err)
 	case !held:
+		w.observe(ResultLeaseLost)
 		w.log.Warn("lease lost before marking; another replica relays this event too", "eventId", m.ID)
+	default:
+		w.observe(ResultPublished)
+	}
+}
+
+func (w *Worker) observe(result string) {
+	if w.cfg.Observer != nil {
+		w.cfg.Observer.Attempt(result)
 	}
 }
 
