@@ -1,11 +1,9 @@
-// Package telemetry sets up OpenTelemetry tracing. It is configured by the standard OTEL_* environment variables and is off
-// unless an OTLP endpoint is given, so a plain run pays nothing for it.
+// Package telemetry sets up OpenTelemetry tracing from the standard OTEL_* variables; it is off unless an OTLP endpoint is given.
 package telemetry
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -16,11 +14,9 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// DefaultServiceName is used unless OTEL_SERVICE_NAME says otherwise.
 const DefaultServiceName = "wallet-service"
 
-// Enabled reports whether the environment asks for traces to be exported: any OTLP endpoint turns tracing on, and
-// OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none turns it off again.
+// Enabled is true when an OTLP endpoint is set, unless OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none say otherwise.
 func Enabled(getenv func(string) string) bool {
 	if strings.EqualFold(getenv("OTEL_SDK_DISABLED"), "true") || strings.EqualFold(getenv("OTEL_TRACES_EXPORTER"), "none") {
 		return false
@@ -28,14 +24,11 @@ func Enabled(getenv func(string) string) bool {
 	return getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
 }
 
-// Shutdown flushes buffered spans; call it after the components that create spans have stopped.
 type Shutdown func(ctx context.Context) error
 
-// Setup installs the global propagator (W3C trace context and baggage, so an incoming traceparent is honored even
-// when export is off) and, when enabled, a tracer provider that exports over OTLP/HTTP. Endpoint, headers, protocol
-// details, sampler and resource attributes come from the standard OTEL_* variables.
+// Setup always installs the W3C propagator, so an incoming traceparent is honored even with export off, and when enabled an OTLP/HTTP tracer provider.
 func Setup(ctx context.Context, enabled bool) (Shutdown, error) {
-	otel.SetTextMapPropagator(Propagator())
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 	if !enabled {
 		return func(context.Context) error { return nil }, nil
 	}
@@ -62,10 +55,3 @@ func install(ctx context.Context, exporter sdktrace.SpanExporter) (Shutdown, err
 	otel.SetTracerProvider(tp)
 	return tp.Shutdown, nil
 }
-
-func Propagator() propagation.TextMapPropagator {
-	return propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
-}
-
-// FromEnv is Enabled over the process environment.
-func FromEnv() bool { return Enabled(os.Getenv) }
