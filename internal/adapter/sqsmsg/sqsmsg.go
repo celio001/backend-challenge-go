@@ -65,7 +65,9 @@ type Result struct {
 	Action    Action
 	Code      string
 	MessageID string
-	Err       error
+	// Replay is set when the message repeated work that was already done, so it changed nothing.
+	Replay bool
+	Err    error
 }
 
 type Handler struct {
@@ -110,10 +112,11 @@ func (h *Handler) Handle(ctx context.Context, d Delivery) Result {
 	}
 
 	// PROCESSED, REJECTED, PENDING_REFERENCE and replays are all durable results.
-	if _, err := h.process.Execute(ctx, in); err != nil {
+	out, err := h.process.Execute(ctx, in)
+	if err != nil {
 		return classify(in.Inbox, err)
 	}
-	return Result{Action: Delete, MessageID: in.Inbox.MessageID}
+	return Result{Action: Delete, MessageID: in.Inbox.MessageID, Replay: out.Replay}
 }
 
 func (h *Handler) parse(d Delivery) (processwager.Input, error) {
