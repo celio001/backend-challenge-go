@@ -445,3 +445,18 @@ func TestEachMessageHasASpanThatContinuesTheSendersTrace(t *testing.T) {
 		})
 	}
 }
+
+// The span is not over until the message is settled, so a dead letter that could not be written shows up as a retry.
+func TestAFailedDeadLetterEndsTheMessageSpanAsARetry(t *testing.T) {
+	rec := spantest.Install(t)
+	q := &fakeQueue{batches: [][]types.Message{{msg("a", "g", "1")}}, sendErr: errors.New("dlq down")}
+	c := NewConsumer(q, handlerFunc(func(context.Context, Message) Verdict {
+		return Verdict{Action: DeadLetter, Code: "MALFORMED_MESSAGE"}
+	}), testConfig(), quiet())
+	runUntil(t, c, func() bool { return len(rec.Named("sqs.process")) == 1 })
+
+	s := rec.Named("sqs.process")[0]
+	if attrs := spantest.Attrs(s); attrs["messaging.outcome"] != "retry" || s.Status().Code != codes.Error {
+		t.Fatalf("outcome = %q, status = %v", attrs["messaging.outcome"], s.Status())
+	}
+}
