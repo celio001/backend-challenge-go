@@ -9,17 +9,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/celio001/backend-challenge-go/internal/infra/observability"
 	"github.com/celio001/backend-challenge-go/internal/infra/postgres"
 	"github.com/celio001/backend-challenge-go/internal/usecase"
 	"github.com/celio001/backend-challenge-go/internal/usecase/queries"
+	"github.com/celio001/backend-challenge-go/internal/usecase/reconcile"
 )
 
 var PostgresModule = fx.Module("postgres",
 	fx.Provide(
 		newPool,
-		fx.Annotate(postgres.NewUnitOfWork, fx.As(new(usecase.UnitOfWork))),
+		fx.Annotate(newUnitOfWork, fx.As(new(usecase.UnitOfWork))),
+		func(p *pgxpool.Pool) observability.Stats { return postgres.NewStatsReader(p) },
 		fx.Annotate(func(p *pgxpool.Pool) *postgres.WalletReader { return postgres.NewWalletReader(p) }, fx.As(new(queries.WalletReader))),
 		fx.Annotate(func(p *pgxpool.Pool) *postgres.LedgerReader { return postgres.NewLedgerReader(p) }, fx.As(new(queries.LedgerReader))),
+		fx.Annotate(postgres.NewReconciliationReader, fx.As(new(reconcile.Reader))),
 		fx.Annotate(func(p *pgxpool.Pool) *postgres.TransactionReader { return postgres.NewTransactionReader(p) }, fx.As(new(queries.TransactionReader))),
 	),
 )
@@ -65,4 +69,8 @@ func retryUntil(ctx context.Context, log *slog.Logger, dependency string, fn fun
 		}
 		delay = min(delay*2, 2*time.Second)
 	}
+}
+
+func newUnitOfWork(pool *pgxpool.Pool, m *observability.Metrics) *postgres.UnitOfWork {
+	return postgres.NewUnitOfWork(pool, postgres.WithObserver(m))
 }
