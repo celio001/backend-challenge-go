@@ -23,9 +23,10 @@ const (
 )
 
 type walletHandlers struct {
-	open    OpenWallet
-	queries WalletQueries
-	log     *slog.Logger
+	open      OpenWallet
+	queries   WalletQueries
+	reconcile Reconciler
+	log       *slog.Logger
 }
 
 type openWalletRequest struct {
@@ -126,6 +127,28 @@ func (h walletHandlers) ledger(w http.ResponseWriter, r *http.Request) {
 		resp.NextCursor = &page.NextCursor
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type reconciliationResponse struct {
+	WalletID          string      `json:"walletId"`
+	StoredBalance     money.Money `json:"storedBalance"`
+	CalculatedBalance money.Money `json:"calculatedBalance"`
+	Difference        money.Money `json:"difference"`
+	Consistent        bool        `json:"consistent"`
+	CheckedEntries    int64       `json:"checkedEntries"`
+}
+
+// reconciliation answers 200 whether or not the wallet is consistent: the check itself succeeded, and the verdict is in the body.
+func (h walletHandlers) reconciliation(w http.ResponseWriter, r *http.Request) {
+	report, err := h.reconcile.Execute(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, reconciliationResponse{
+		WalletID: string(report.WalletID), StoredBalance: report.Stored, CalculatedBalance: report.Calculated,
+		Difference: report.Difference, Consistent: report.Consistent, CheckedEntries: report.CheckedEntries,
+	})
 }
 
 func (h walletHandlers) writeError(w http.ResponseWriter, r *http.Request, err error) {
