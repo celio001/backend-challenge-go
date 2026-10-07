@@ -9,12 +9,17 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/celio001/backend-challenge-go/internal/usecase"
 	"github.com/celio001/backend-challenge-go/pkg/faultinject"
 )
 
 // Observer is told about the database's own signals, so they can be counted without the use cases knowing.
+const tracerName = "github.com/celio001/backend-challenge-go/postgres"
+
 type Observer interface {
 	// TransientFailure is called each time the database asked to try again; sqlstate is the SQLSTATE, or "none" for timeouts and lost connections.
 	TransientFailure(sqlstate string)
@@ -56,7 +61,21 @@ func sqlState(err error) string {
 }
 
 // Do surfaces deferred constraint failures (e.g. wallet/ledger consistency) from Commit, not from the statements.
-func (u *UnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx usecase.Repos) error) error {
+func (u *UnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx usecase.Repos) error) (err error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "db.transaction")
+	defer func() {
+		// A rollback because the business said no is normal; only the database's own failures are span errors.
+		switch {
+		case err == nil:
+		case errors.Is(err, usecase.ErrTransient) || errors.Is(err, usecase.ErrPermanent):
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "transaction failed")
+		default:
+			span.SetAttributes(attribute.Bool("db.rolled_back", true))
+		}
+		span.End()
+	}()
+
 	tx, err := u.pool.Begin(ctx)
 	if err != nil {
 		return u.classify(fmt.Errorf("begin tx: %w", err))
