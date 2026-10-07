@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/celio001/backend-challenge-go/internal/auth"
+	"github.com/celio001/backend-challenge-go/internal/infra/observability"
 	"github.com/celio001/backend-challenge-go/internal/usecase"
 )
 
@@ -37,14 +38,16 @@ type handlerParams struct {
 	ProcessWager httpapi.ProcessWager
 	Queries      httpapi.WalletQueries
 	TxQueries    httpapi.TransactionQueries
+	Reconcile    httpapi.Reconciler
 	Verifier     auth.Verifier
 	IDs          usecase.IDGenerator
 	Health       *httpapi.Health
+	Metrics      *observability.Metrics
 	Log          *slog.Logger
 }
 
 func newHandler(p handlerParams) http.Handler {
-	return httpapi.New(httpapi.Deps{OpenWallet: p.OpenWallet, ProcessWager: p.ProcessWager, Queries: p.Queries, TxQueries: p.TxQueries, Verifier: p.Verifier, IDs: p.IDs, Health: p.Health, Log: p.Log})
+	return httpapi.New(httpapi.Deps{OpenWallet: p.OpenWallet, ProcessWager: p.ProcessWager, Queries: p.Queries, TxQueries: p.TxQueries, Reconcile: p.Reconcile, Verifier: p.Verifier, IDs: p.IDs, Health: p.Health, Metrics: p.Metrics.Handler(), Log: p.Log})
 }
 
 // Listen is synchronous so a busy port fails the boot instead of a background goroutine.
