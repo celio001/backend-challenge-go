@@ -360,6 +360,32 @@ func TestSQSEntry(t *testing.T) {
 		noDeadLetters(t)
 	})
 
+	t.Run("metrics tell what happened to the messages", func(t *testing.T) {
+		resp, err := http.Get(base + "/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		body := string(raw)
+		for _, want := range []string{
+			`sqs_messages_total{outcome="deleted"}`, `sqs_messages_total{outcome="duplicate"}`, `sqs_messages_total{outcome="dead_lettered"}`,
+			`wager_transactions_total{channel="sqs",failure_code="",kind="BET",status="PROCESSED"}`,
+			`wager_transactions_total{channel="sqs",failure_code="INSUFFICIENT_FUNDS",kind="BET",status="REJECTED"}`,
+			`wager_transactions_total{channel="sqs",failure_code="",kind="REFUND",status="PENDING_REFERENCE"}`,
+			`wager_idempotent_replays_total{channel="sqs"}`,
+			`wager_idempotency_conflicts_total{reason="message_id_reused"}`,
+			`wager_idempotency_conflicts_total{reason="external_id_conflict"}`,
+		} {
+			if !strings.Contains(body, want+" ") {
+				t.Errorf("series %s is missing", want)
+			}
+		}
+		if strings.Contains(body, `sqs_receive_errors_total 0`) == false {
+			t.Errorf("sqs_receive_errors_total should be exposed and zero while the queue is healthy")
+		}
+	})
+
 	t.Run("health reports the inbound queue and shutdown drains the consumer", func(t *testing.T) {
 		r := call(t, http.MethodGet, base+"/health/ready", "", "", "")
 		checks, _ := r.body["checks"].(map[string]any)
