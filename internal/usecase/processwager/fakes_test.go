@@ -1,6 +1,7 @@
 package processwager
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -18,6 +19,7 @@ type fakeStore struct {
 	ledger  []wallet.LedgerEntry
 	outbox  []usecase.OutboxEvent
 	nextAt  map[wallet.TxID]time.Time
+	inbox   map[string][]byte // consumer/messageId → hash
 
 	doErrs    []error // consumed one per Do call, before fn runs
 	doCalls   int
@@ -30,6 +32,7 @@ func newFakeStore() *fakeStore {
 		wallets: map[wallet.WalletID]*wallet.Wallet{},
 		txs:     map[wallet.TxID]*wager.Transaction{},
 		nextAt:  map[wallet.TxID]time.Time{},
+		inbox:   map[string][]byte{},
 	}
 }
 
@@ -37,6 +40,7 @@ func (s *fakeStore) Wallets() usecase.WalletRepository           { return fakeWa
 func (s *fakeStore) Transactions() usecase.TransactionRepository { return fakeTxs{s} }
 func (s *fakeStore) Ledger() usecase.LedgerRepository            { return fakeLedger{s} }
 func (s *fakeStore) Outbox() usecase.OutboxWriter                { return fakeOutbox{s} }
+func (s *fakeStore) Inbox() usecase.InboxRepository              { return fakeInbox{s} }
 
 func (s *fakeStore) Do(ctx context.Context, fn func(context.Context, usecase.Repos) error) error {
 	s.doCalls++
@@ -51,8 +55,12 @@ func (s *fakeStore) Do(ctx context.Context, fn func(context.Context, usecase.Rep
 	for k, v := range s.nextAt {
 		nextAt[k] = v
 	}
+	inbox := make(map[string][]byte, len(s.inbox))
+	for k, v := range s.inbox {
+		inbox[k] = v
+	}
 	if err := fn(ctx, s); err != nil {
-		s.wallets, s.txs, s.ledger, s.outbox, s.nextAt = wallets, txs, ledger, outbox, nextAt
+		s.wallets, s.txs, s.ledger, s.outbox, s.nextAt, s.inbox = wallets, txs, ledger, outbox, nextAt, inbox
 		return err
 	}
 	return nil
@@ -207,4 +215,19 @@ func (f fakeOutbox) Add(_ context.Context, e usecase.OutboxEvent) error {
 	}
 	f.s.outbox = append(f.s.outbox, e)
 	return nil
+}
+
+type fakeInbox struct{ s *fakeStore }
+
+func (f fakeInbox) Register(_ context.Context, m usecase.InboxMessage) (bool, error) {
+	key := m.Consumer + "/" + m.MessageID
+	stored, seen := f.s.inbox[key]
+	if !seen {
+		f.s.inbox[key] = m.Hash
+		return false, nil
+	}
+	if !bytes.Equal(stored, m.Hash) {
+		return false, usecase.ErrInboxHashMismatch
+	}
+	return true, nil
 }
