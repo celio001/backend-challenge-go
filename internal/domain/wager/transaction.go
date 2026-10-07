@@ -12,6 +12,7 @@ import (
 const payloadHashSize = 32
 
 var (
+	ErrNotFound           = errors.New("wager: transaction not found")
 	ErrMissingField       = errors.New("wager: missing required field")
 	ErrUnexpectedField    = errors.New("wager: field not applicable")
 	ErrReferenceRequired  = errors.New("wager: reference external transaction id is required")
