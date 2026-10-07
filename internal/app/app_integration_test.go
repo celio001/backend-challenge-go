@@ -22,6 +22,7 @@ import (
 	"go.uber.org/fx/fxtest"
 
 	"github.com/celio001/backend-challenge-go/internal/testutil/pgtest"
+	"github.com/celio001/backend-challenge-go/internal/testutil/sqstest"
 )
 
 func keycloakURL(t *testing.T) string {
@@ -106,8 +107,11 @@ func call(t *testing.T, method, url, token, correlation, body string) reply {
 func TestEndToEnd(t *testing.T) {
 	kc := keycloakURL(t)
 	pool, dbURL := pgtest.New(t)
+	events := sqstest.New(t)
 	addr := freeAddr(t)
 	t.Setenv("HTTP_ADDR", addr)
+	t.Setenv("SQS_ENDPOINT", os.Getenv("TEST_SQS_ENDPOINT"))
+	t.Setenv("EVENTS_QUEUE_NAME", events.Name)
 	t.Setenv("DATABASE_URL", dbURL)
 	t.Setenv("OIDC_ISSUER", kc+"/realms/wallet")
 	t.Setenv("OIDC_DISCOVERY_URL", "")
@@ -368,12 +372,57 @@ func TestEndToEnd(t *testing.T) {
 		})
 	})
 
+	t.Run("every committed event reaches the queue once, in the wallet's group", func(t *testing.T) {
+		deadline := time.Now().Add(20 * time.Second)
+		for count(`SELECT count(*) FROM outbox_events WHERE published_at IS NULL`) != 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the outbox was not drained by the relay")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		total := count(`SELECT count(*) FROM outbox_events`)
+		got := events.WaitFor(t, total, 30*time.Second)
+		if len(got) != total {
+			t.Fatalf("queue holds %d events, outbox has %d", len(got), total)
+		}
+		seen := map[string]bool{}
+		var forWallet int
+		for _, m := range got {
+			if seen[m.EventID] {
+				t.Fatalf("event %s arrived twice", m.EventID)
+			}
+			seen[m.EventID] = true
+			var inDB int
+			if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM outbox_events WHERE id = $1 AND partition_key = $2 AND payload = $3`, m.EventID, m.GroupID, m.Body).Scan(&inDB); err != nil || inDB != 1 {
+				t.Fatalf("event %s arrived in group %s with a body that is not the stored snapshot (%d, %v)", m.EventID, m.GroupID, inDB, err)
+			}
+			if m.GroupID == walletID {
+				forWallet++
+				var env struct {
+					EventID       string `json:"eventId"`
+					EventType     string `json:"eventType"`
+					CorrelationID string `json:"correlationId"`
+					AggregateID   string `json:"aggregateId"`
+				}
+				if err := json.Unmarshal([]byte(m.Body), &env); err != nil {
+					t.Fatalf("body is not an event envelope: %q", m.Body)
+				}
+				if env.CorrelationID != "e2e-corr-1" || env.EventType != m.EventType || env.EventID != m.EventID || env.AggregateID == "" {
+					t.Fatalf("envelope of %s = %+v", m.EventType, env)
+				}
+			}
+		}
+		if forWallet < 2 {
+			t.Fatalf("the opening events of wallet %s were not delivered", walletID)
+		}
+	})
+
 	t.Run("health endpoints are public", func(t *testing.T) {
 		if r := call(t, http.MethodGet, base+"/health/live", "", "", ""); r.status != http.StatusOK || r.body["status"] != "UP" {
 			t.Fatalf("live: status = %d, body = %v", r.status, r.body)
 		}
 		checks, _ := call(t, http.MethodGet, base+"/health/ready", "", "", "").body["checks"].(map[string]any)
-		if r := call(t, http.MethodGet, base+"/health/ready", "", "", ""); r.status != http.StatusOK || checks["postgres"] != "up" {
+		if r := call(t, http.MethodGet, base+"/health/ready", "", "", ""); r.status != http.StatusOK || checks["postgres"] != "up" || checks["sqs"] != "up" {
 			t.Fatalf("ready: status = %d, body = %v", r.status, r.body)
 		}
 	})
