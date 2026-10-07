@@ -8,6 +8,7 @@ DB_PASSWORD ?= postgres
 DB_NAME ?= challenge
 DB_SSL_MODE ?= disable
 
+TEST_DATABASE_URL ?= postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/postgres?sslmode=$(DB_SSL_MODE)
 TEST_KEYCLOAK_URL ?= http://localhost:8080
 TEST_SQS_ENDPOINT ?= http://localhost:4566
 
@@ -37,7 +38,7 @@ test: ## Run tests
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (TEST_DATABASE_URL: Postgres superuser; TEST_KEYCLOAK_URL: Keycloak with the wallet realm; TEST_SQS_ENDPOINT: LocalStack)
-	TEST_KEYCLOAK_URL=$(TEST_KEYCLOAK_URL) TEST_SQS_ENDPOINT=$(TEST_SQS_ENDPOINT) $(GO) test -tags integration -count=1 -race -timeout 5m ./internal/...
+	TEST_DATABASE_URL=$(TEST_DATABASE_URL) TEST_KEYCLOAK_URL=$(TEST_KEYCLOAK_URL) TEST_SQS_ENDPOINT=$(TEST_SQS_ENDPOINT) $(GO) test -tags integration -count=1 -race -timeout 5m ./internal/...
 
 migrate-up: ## Run migrations up
 	goose -dir $(MIGRATIONS_DIR) postgres "$(DB_URL)" up
