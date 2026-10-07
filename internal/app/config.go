@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 var ErrInvalidConfig = errors.New("app: invalid configuration")
@@ -15,6 +16,7 @@ type Config struct {
 	OIDCIssuer       string
 	OIDCDiscoveryURL string
 	OIDCAudience     string
+	ReferenceTTL     time.Duration
 }
 
 func LoadConfig(getenv func(string) string) (Config, error) {
@@ -25,6 +27,12 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		OIDCDiscoveryURL: getenv("OIDC_DISCOVERY_URL"),
 		OIDCAudience:     withDefault(getenv("OIDC_AUDIENCE"), "wallet-api"),
 	}
+	ttl, err := time.ParseDuration(withDefault(getenv("REFERENCE_TTL"), "10m"))
+	if err != nil || ttl <= 0 {
+		return Config{}, fmt.Errorf("%w: REFERENCE_TTL must be a positive duration such as 10m", ErrInvalidConfig)
+	}
+	cfg.ReferenceTTL = ttl
+
 	var missing []string
 	if cfg.DatabaseURL == "" {
 		missing = append(missing, "DATABASE_URL")
