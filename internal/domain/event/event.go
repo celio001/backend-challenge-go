@@ -13,12 +13,16 @@ import (
 var (
 	ErrMissingID       = errors.New("event: missing event id")
 	ErrNotProcessed    = errors.New("event: transaction is not processed")
+	ErrNotRejected     = errors.New("event: transaction is not rejected")
+	ErrNotPending      = errors.New("event: transaction is not waiting for a reference")
 	ErrInvalidMovement = errors.New("event: ledger entry is not a balance movement")
 )
 
 const (
-	TypeWagerTransactionProcessed = "WagerTransactionProcessed"
-	TypeWalletBalanceChanged      = "WalletBalanceChanged"
+	TypeWagerTransactionProcessed        = "WagerTransactionProcessed"
+	TypeWagerTransactionRejected         = "WagerTransactionRejected"
+	TypeWagerTransactionPendingReference = "WagerTransactionPendingReference"
+	TypeWalletBalanceChanged             = "WalletBalanceChanged"
 
 	aggregateTransaction = "wager_transaction"
 	aggregateWallet      = "wallet"
@@ -64,6 +68,29 @@ type WagerTransactionProcessedData struct {
 	ExternalTransactionID string      `json:"externalTransactionId,omitempty"`
 }
 
+type WagerTransactionRejectedData struct {
+	TransactionID         string      `json:"transactionId"`
+	WalletID              string      `json:"walletId"`
+	PlayerID              string      `json:"playerId"`
+	Kind                  string      `json:"kind"`
+	Money                 money.Money `json:"money"`
+	FailureCode           string      `json:"failureCode"`
+	ProviderID            string      `json:"providerId"`
+	ExternalTransactionID string      `json:"externalTransactionId"`
+}
+
+type WagerTransactionPendingReferenceData struct {
+	TransactionID                  string      `json:"transactionId"`
+	WalletID                       string      `json:"walletId"`
+	PlayerID                       string      `json:"playerId"`
+	Kind                           string      `json:"kind"`
+	Money                          money.Money `json:"money"`
+	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId"`
+	ExpiresAt                      string      `json:"expiresAt"`
+	ProviderID                     string      `json:"providerId"`
+	ExternalTransactionID          string      `json:"externalTransactionId"`
+}
+
 type WalletBalanceChangedData struct {
 	WalletID      string      `json:"walletId"`
 	TransactionID string      `json:"transactionId"`
@@ -101,6 +128,67 @@ func NewWagerTransactionProcessed(id, causationID string, t *wager.Transaction) 
 			ResultBalance:         t.ResultBalance(),
 			ProviderID:            t.ProviderID(),
 			ExternalTransactionID: t.ExternalTransactionID(),
+		},
+	}, nil
+}
+
+func NewWagerTransactionRejected(id, causationID string, t *wager.Transaction) (Event, error) {
+	if id == "" {
+		return Event{}, ErrMissingID
+	}
+	if t.Status() != wager.StatusRejected {
+		return Event{}, ErrNotRejected
+	}
+	return Event{
+		ID:            id,
+		Type:          TypeWagerTransactionRejected,
+		Version:       1,
+		AggregateType: aggregateTransaction,
+		AggregateID:   string(t.ID()),
+		PartitionKey:  string(t.WalletID()),
+		CorrelationID: t.CorrelationID(),
+		CausationID:   causationID,
+		OccurredAt:    t.UpdatedAt(),
+		Data: WagerTransactionRejectedData{
+			TransactionID:         string(t.ID()),
+			WalletID:              string(t.WalletID()),
+			PlayerID:              string(t.PlayerID()),
+			Kind:                  string(t.Kind()),
+			Money:                 t.Amount(),
+			FailureCode:           string(t.FailureCode()),
+			ProviderID:            t.ProviderID(),
+			ExternalTransactionID: t.ExternalTransactionID(),
+		},
+	}, nil
+}
+
+func NewWagerTransactionPendingReference(id, causationID string, t *wager.Transaction) (Event, error) {
+	if id == "" {
+		return Event{}, ErrMissingID
+	}
+	if t.Status() != wager.StatusPendingReference {
+		return Event{}, ErrNotPending
+	}
+	return Event{
+		ID:            id,
+		Type:          TypeWagerTransactionPendingReference,
+		Version:       1,
+		AggregateType: aggregateTransaction,
+		AggregateID:   string(t.ID()),
+		PartitionKey:  string(t.WalletID()),
+		CorrelationID: t.CorrelationID(),
+		CausationID:   causationID,
+		OccurredAt:    t.UpdatedAt(),
+		Data: WagerTransactionPendingReferenceData{
+			TransactionID:                  string(t.ID()),
+			WalletID:                       string(t.WalletID()),
+			PlayerID:                       string(t.PlayerID()),
+			Kind:                           string(t.Kind()),
+			Money:                          t.Amount(),
+			ReferenceExternalTransactionID: t.ReferenceExternalID(),
+			ExpiresAt:                      t.ExpiresAt().UTC().Format(timeLayout),
+			ProviderID:                     t.ProviderID(),
+			ExternalTransactionID:          t.ExternalTransactionID(),
 		},
 	}, nil
 }
