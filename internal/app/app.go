@@ -28,6 +28,7 @@ var Module = fx.Options(
 	UseCaseModule,
 	HTTPModule,
 	OutboxModule,
+	ConsumerModule,
 )
 
 // Fx wiring events are debug noise in production; its failures still surface at error level.
