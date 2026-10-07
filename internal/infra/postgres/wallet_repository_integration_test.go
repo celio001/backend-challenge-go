@@ -110,7 +110,7 @@ func TestOpenWalletAgainstPostgres(t *testing.T) {
 			t.Fatalf("ledger entries = %d", n)
 		}
 		for _, typ := range []string{"WagerTransactionProcessed", "WalletBalanceChanged"} {
-			if n := count(`SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND event_type = $2 AND payload->>'correlationId' = 'corr'`, id, typ); n != 1 {
+			if n := count(`SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND event_type = $2 AND payload::jsonb->>'correlationId' = 'corr'`, id, typ); n != 1 {
 				t.Fatalf("%s events = %d", typ, n)
 			}
 		}
