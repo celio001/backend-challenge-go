@@ -1,0 +1,116 @@
+services:
+  backend-challenge-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend-challenge-1
+    ports:
+      - "8081:8081"
+    networks:
+      - backend-challenge-go
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend-challenge-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend-challenge-2
+    ports:
+      - "8082:8081"
+    networks:
+      - backend-challenge-go
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+  backend-challenge-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend-challenge-3
+    ports:
+      - "8083:8081"
+    networks:
+      - backend-challenge-go
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: challenge-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: challenge
+    volumes:
+      - db_data:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+    networks:
+      - backend-challenge-go
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8080
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    command: start-dev --import-realm
+    volumes:
+      - ./deploy/keycloak-realm.json:/opt/keycloak/data/import/wallet-realm.json:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - backend-challenge-go
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '\"status\": \"UP\"' <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  Localstack:
+    image: localstack/localstack:2.2
+    container_name: localstack
+    environment:
+      - SERVICES=s3
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+    ports:
+      - "4566:4566"
+      - "4571:4571"
+    networks:
+      - backend-challenge-go
+    volumes:
+      - ./localstack:/tmp/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+volumes:
+  db_data:
+
+networks:
+  backend-challenge-go:
