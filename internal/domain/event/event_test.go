@@ -116,3 +116,66 @@ func TestNewWagerTransactionProcessed(t *testing.T) {
 		})
 	}
 }
+
+func TestNewWagerTransactionRejectedAndPending(t *testing.T) {
+	bet := func(kind wager.Kind, ref string) *wager.Transaction {
+		tx, err := wager.NewExternal(wager.ExternalInput{
+			ID: "tx2", ProviderID: "provider-a", ExternalTransactionID: "ext-1", IdempotencyKey: "k",
+			PayloadHash: make([]byte, 32), WalletID: "w1", PlayerID: "p1", RoundID: "r", GameID: "g",
+			Kind: kind, Amount: mustMoney(t, 2500), ReferenceExternalID: ref, CorrelationID: "corr",
+		}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tx
+	}
+	rejected := bet(wager.KindBet, "")
+	if err := rejected.Reject(wager.CodeInsufficientFunds, now); err != nil {
+		t.Fatal(err)
+	}
+	pending := bet(wager.KindRefund, "ext-0")
+	if err := pending.MarkPendingReference(now.Add(10*time.Minute), now); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("rejected", func(t *testing.T) {
+		ev, err := NewWagerTransactionRejected("ev1", "msg-1", rejected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := json.Marshal(ev)
+		want := `{"eventId":"ev1","eventType":"WagerTransactionRejected","version":1,"aggregateId":"tx2","correlationId":"corr","causationId":"msg-1","occurredAt":"2026-09-08T12:00:00.123Z","data":{"transactionId":"tx2","walletId":"w1","playerId":"p1","kind":"BET","money":{"amount":"25.00","currency":"BRL"},"failureCode":"INSUFFICIENT_FUNDS","providerId":"provider-a","externalTransactionId":"ext-1"}}`
+		if string(got) != want {
+			t.Fatalf("json =\n%s\nwant\n%s", got, want)
+		}
+	})
+	t.Run("pending reference", func(t *testing.T) {
+		ev, err := NewWagerTransactionPendingReference("ev2", "", pending)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := json.Marshal(ev)
+		want := `{"eventId":"ev2","eventType":"WagerTransactionPendingReference","version":1,"aggregateId":"tx2","correlationId":"corr","occurredAt":"2026-09-08T12:00:00.123Z","data":{"transactionId":"tx2","walletId":"w1","playerId":"p1","kind":"REFUND","money":{"amount":"25.00","currency":"BRL"},"referenceExternalTransactionId":"ext-0","expiresAt":"2026-09-08T12:10:00.123Z","providerId":"provider-a","externalTransactionId":"ext-1"}}`
+		if string(got) != want {
+			t.Fatalf("json =\n%s\nwant\n%s", got, want)
+		}
+	})
+
+	tests := []struct {
+		name    string
+		build   func() error
+		wantErr error
+	}{
+		{name: "rejected event from a pending transaction", build: func() error { _, err := NewWagerTransactionRejected("e", "", bet(wager.KindBet, "")); return err }, wantErr: ErrNotRejected},
+		{name: "rejected event without id", build: func() error { _, err := NewWagerTransactionRejected("", "", rejected); return err }, wantErr: ErrMissingID},
+		{name: "pending event from a rejected transaction", build: func() error { _, err := NewWagerTransactionPendingReference("e", "", rejected); return err }, wantErr: ErrNotPending},
+		{name: "pending event without id", build: func() error { _, err := NewWagerTransactionPendingReference("", "", pending); return err }, wantErr: ErrMissingID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.build(); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
