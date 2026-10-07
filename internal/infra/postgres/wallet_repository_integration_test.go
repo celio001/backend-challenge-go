@@ -247,7 +247,7 @@ func seedDebit(t *testing.T, pool *pgxpool.Pool, walletID, playerID string, vers
 func TestQueriesAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)
-	q := queries.New(NewWalletReader(pool), NewLedgerReader(pool))
+	q := queries.New(NewWalletReader(pool), NewLedgerReader(pool), NewTransactionReader(pool))
 
 	w, err := openwallet.New(NewUnitOfWork(pool), realClock{}, uuidIDs{t}).Execute(ctx, openwallet.Input{PlayerID: newUUID(t), InitialBalance: brl(t, 100000)})
 	if err != nil {
