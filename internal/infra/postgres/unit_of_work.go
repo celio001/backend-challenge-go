@@ -23,16 +23,16 @@ func NewUnitOfWork(pool *pgxpool.Pool) *UnitOfWork {
 func (u *UnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx usecase.Repos) error) error {
 	tx, err := u.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return classify(fmt.Errorf("begin tx: %w", err))
 	}
 	if err := fn(ctx, repos{tx}); err != nil {
 		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			return fmt.Errorf("%w (rollback: %v)", err, rbErr)
+			return classify(fmt.Errorf("%w (rollback: %v)", err, rbErr))
 		}
-		return err
+		return classify(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
+		return classify(fmt.Errorf("commit tx: %w", err))
 	}
 	return nil
 }
