@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/celio001/backend-challenge-go/internal/infra/observability"
 	"github.com/celio001/backend-challenge-go/internal/infra/outbox"
 	"github.com/celio001/backend-challenge-go/internal/infra/postgres"
 	"github.com/celio001/backend-challenge-go/internal/infra/system"
@@ -17,9 +18,9 @@ import (
 var OutboxModule = fx.Module("outbox", fx.Invoke(runOutbox))
 
 // runOutbox registers after the pool and the queue, so Fx stops it first: no event is half relayed when they close.
-func runOutbox(lc fx.Lifecycle, pool *pgxpool.Pool, pub outbox.Publisher, log *slog.Logger) {
+func runOutbox(lc fx.Lifecycle, cfg Config, pool *pgxpool.Pool, pub outbox.Publisher, m *observability.Metrics, log *slog.Logger) {
 	owner := replicaID()
-	worker := outbox.New(postgres.NewOutboxStore(pool), pub, outbox.Config{Owner: owner}, log)
+	worker := outbox.New(postgres.NewOutboxStore(pool), pub, outbox.Config{Owner: owner, Lease: cfg.OutboxLease, Observer: m}, log)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
