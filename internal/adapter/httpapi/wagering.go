@@ -58,6 +58,8 @@ type transactionResponse struct {
 	ReferenceExternalTransactionID string       `json:"referenceExternalTransactionId,omitempty"`
 	ReferenceTransactionID         string       `json:"referenceTransactionId,omitempty"`
 	ExpiresAt                      string       `json:"expiresAt,omitempty"`
+	Attempts                       *int         `json:"attempts,omitempty"`
+	NextAttemptAt                  string       `json:"nextAttemptAt,omitempty"`
 	CreatedAt                      string       `json:"createdAt"`
 	UpdatedAt                      string       `json:"updatedAt"`
 }
@@ -190,6 +192,14 @@ func transactionView(t *wager.Transaction) transactionResponse {
 	}
 	if !t.ExpiresAt().IsZero() {
 		resp.ExpiresAt = t.ExpiresAt().UTC().Format(timeLayout)
+	}
+	// Progress of the wait for a reference; once settled these facts are history and stay out of the answer.
+	if t.Status() == wager.StatusPendingReference {
+		attempts := t.Attempts()
+		resp.Attempts = &attempts
+		if !t.NextAttemptAt().IsZero() {
+			resp.NextAttemptAt = t.NextAttemptAt().UTC().Format(timeLayout)
+		}
 	}
 	return resp
 }
