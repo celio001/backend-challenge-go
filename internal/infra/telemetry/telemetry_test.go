@@ -162,3 +162,54 @@ func TestSetupExportsOverOTLPHTTPToTheConfiguredEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestTheSamplerComesFromTheEnvironment(t *testing.T) {
+	tests := []struct {
+		name      string
+		sampler   string
+		wantSpans int
+	}{
+		{name: "the default records everything", wantSpans: 1},
+		{name: "always_off records nothing", sampler: "always_off", wantSpans: 0},
+		{name: "a ratio of 0 records nothing", sampler: "traceidratio", wantSpans: 0},
+		{name: "always_on records it", sampler: "always_on", wantSpans: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreGlobals(t)
+			t.Setenv("OTEL_TRACES_SAMPLER", tt.sampler)
+			t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")
+			exp := tracetest.NewInMemoryExporter()
+			if _, err := install(context.Background(), exp); err != nil {
+				t.Fatal(err)
+			}
+			_, span := otel.Tracer("test").Start(context.Background(), "work")
+			span.End()
+			if err := otel.GetTracerProvider().(*sdktrace.TracerProvider).ForceFlush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(exp.GetSpans()); got != tt.wantSpans {
+				t.Fatalf("exported %d spans, want %d", got, tt.wantSpans)
+			}
+		})
+	}
+}
+
+// Baggage would carry whatever the caller chose into our outgoing messages, and nothing here reads it.
+func TestCallerBaggageIsNotPropagated(t *testing.T) {
+	restoreGlobals(t)
+	if _, err := Setup(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	carrier := propagation.MapCarrier{
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"baggage":     "user=someone",
+	}
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
+
+	out := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, out)
+	if _, leaked := out["baggage"]; leaked {
+		t.Fatalf("baggage was propagated: %v", out)
+	}
+}
