@@ -6,6 +6,11 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/celio001/backend-challenge-go/internal/domain/wager"
 	"github.com/celio001/backend-challenge-go/internal/usecase/resolvereference"
 	"github.com/celio001/backend-challenge-go/pkg/faultinject"
@@ -60,6 +65,8 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+const tracerName = "github.com/celio001/backend-challenge-go/refworker"
+
 type Worker struct {
 	store    Store
 	resolver Resolver
@@ -110,8 +117,17 @@ func (w *Worker) resolve(ctx context.Context, p resolvereference.Pending) {
 	faultinject.Hit("after_claim_before_resolve")
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.cfg.ResolveTimeout)
 	defer cancel()
+	rctx, span := otel.Tracer(tracerName).Start(rctx, "pending_reference.resolve", trace.WithAttributes(
+		attribute.String("transaction.id", string(p.ID)), attribute.String("wallet.id", string(p.WalletID)),
+	))
+	defer span.End()
 
 	status, err := w.resolver.Resolve(rctx, p)
+	span.SetAttributes(attribute.String("wager.status", string(status)))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "resolution failed")
+	}
 	log := w.log.With("transactionId", string(p.ID), "walletId", string(p.WalletID))
 	switch {
 	case err != nil:
