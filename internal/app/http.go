@@ -23,8 +23,11 @@ var HTTPModule = fx.Module("http",
 	fx.Invoke(runServer),
 )
 
-func newHealth(pool *pgxpool.Pool) *httpapi.Health {
-	return httpapi.NewHealth(httpapi.Check{Name: "postgres", Fn: pool.Ping})
+func newHealth(pool *pgxpool.Pool, events *eventsQueue) *httpapi.Health {
+	return httpapi.NewHealth(
+		httpapi.Check{Name: "postgres", Fn: pool.Ping},
+		httpapi.Check{Name: "sqs", Fn: events.Ping},
+	)
 }
 
 type handlerParams struct {
