@@ -3,12 +3,15 @@ package sqs
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+	"go.opentelemetry.io/otel"
 
 	"github.com/celio001/backend-challenge-go/internal/infra/outbox"
+	"github.com/celio001/backend-challenge-go/internal/testutil/spantest"
 )
 
 type fakeAPI struct {
@@ -87,4 +90,35 @@ func TestQueueURLAndPing(t *testing.T) {
 	if err := Ping(context.Background(), &fakeAPI{}, "http://queue/events.fifo"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestPublishCarriesTheTraceContextAsMessageAttributes(t *testing.T) {
+	spantest.Install(t)
+	m := outbox.Message{ID: "evt-1", PartitionKey: "wallet-1", Type: "WalletBalanceChanged", Payload: []byte(`{}`)}
+
+	t.Run("inside a span the broker message carries traceparent", func(t *testing.T) {
+		api := &fakeAPI{}
+		ctx, span := otel.Tracer("test").Start(context.Background(), "outbox.publish")
+		defer span.End()
+		if err := NewPublisher(api, "http://queue/events.fifo").Publish(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+		got := aws.ToString(api.sent[0].MessageAttributes["traceparent"].StringValue)
+		if want := span.SpanContext().TraceID().String(); !strings.Contains(got, want) {
+			t.Fatalf("traceparent = %q, want it to carry trace %s", got, want)
+		}
+		if aws.ToString(api.sent[0].MessageAttributes["eventId"].StringValue) != "evt-1" {
+			t.Fatal("the event attributes were lost")
+		}
+	})
+
+	t.Run("outside a span nothing is added", func(t *testing.T) {
+		api := &fakeAPI{}
+		if err := NewPublisher(api, "http://queue/events.fifo").Publish(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := api.sent[0].MessageAttributes["traceparent"]; ok || len(api.sent[0].MessageAttributes) != 2 {
+			t.Fatalf("attributes = %v", api.sent[0].MessageAttributes)
+		}
+	})
 }
