@@ -29,6 +29,7 @@ func (s *fakeStore) Wallets() usecase.WalletRepository           { return fakeWa
 func (s *fakeStore) Transactions() usecase.TransactionRepository { return fakeTxs{s: s} }
 func (s *fakeStore) Ledger() usecase.LedgerRepository            { return fakeLedger{s} }
 func (s *fakeStore) Outbox() usecase.OutboxWriter                { return fakeOutbox{s} }
+func (s *fakeStore) Inbox() usecase.InboxRepository              { panic("not used by this use case") }
 
 // Do drops staged writes when fn fails, mimicking a rollback.
 func (s *fakeStore) Do(ctx context.Context, fn func(context.Context, usecase.Repos) error) error {
