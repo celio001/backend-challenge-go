@@ -6,6 +6,11 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/celio001/backend-challenge-go/pkg/backoff"
 	"github.com/celio001/backend-challenge-go/pkg/faultinject"
 )
@@ -84,6 +89,8 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+const tracerName = "github.com/celio001/backend-challenge-go/outbox"
+
 type Worker struct {
 	store Store
 	pub   Publisher
@@ -133,9 +140,18 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 func (w *Worker) relay(ctx context.Context, m Message) {
 	bg := context.WithoutCancel(ctx)
 
+	bg, span := otel.Tracer(tracerName).Start(bg, "outbox.publish", trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(
+		attribute.String("event.id", m.ID), attribute.String("event.type", m.Type), attribute.String("wallet.id", m.PartitionKey), attribute.Int("outbox.attempt", m.Attempts+1),
+	))
+	defer span.End()
+
 	pctx, cancel := context.WithTimeout(bg, w.cfg.PublishTimeout)
 	err := w.pub.Publish(pctx, m)
 	cancel()
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "publish failed")
+	}
 	if err == nil {
 		// The event is at the broker but the row still says unpublished: another replica must send it again.
 		faultinject.Hit("after_publish_before_mark")
