@@ -21,6 +21,7 @@ var Module = fx.Options(
 		configFromEnv,
 		func() *slog.Logger { return slog.New(slog.NewJSONHandler(os.Stdout, nil)) },
 	),
+	TelemetryModule,
 	SystemModule,
 	ObservabilityModule,
 	PostgresModule,
