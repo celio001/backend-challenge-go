@@ -29,16 +29,18 @@ func newHealth(pool *pgxpool.Pool) *httpapi.Health {
 
 type handlerParams struct {
 	fx.In
-	OpenWallet httpapi.OpenWallet
-	Queries    httpapi.WalletQueries
-	Verifier   auth.Verifier
-	IDs        usecase.IDGenerator
-	Health     *httpapi.Health
-	Log        *slog.Logger
+	OpenWallet   httpapi.OpenWallet
+	ProcessWager httpapi.ProcessWager
+	Queries      httpapi.WalletQueries
+	TxQueries    httpapi.TransactionQueries
+	Verifier     auth.Verifier
+	IDs          usecase.IDGenerator
+	Health       *httpapi.Health
+	Log          *slog.Logger
 }
 
 func newHandler(p handlerParams) http.Handler {
-	return httpapi.New(httpapi.Deps{OpenWallet: p.OpenWallet, Queries: p.Queries, Verifier: p.Verifier, IDs: p.IDs, Health: p.Health, Log: p.Log})
+	return httpapi.New(httpapi.Deps{OpenWallet: p.OpenWallet, ProcessWager: p.ProcessWager, Queries: p.Queries, TxQueries: p.TxQueries, Verifier: p.Verifier, IDs: p.IDs, Health: p.Health, Log: p.Log})
 }
 
 // Listen is synchronous so a busy port fails the boot instead of a background goroutine.
