@@ -13,6 +13,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/celio001/backend-challenge-go/internal/testutil/spantest"
 )
 
 type fakeQueue struct {
@@ -374,5 +378,70 @@ func TestReceiveFailuresAreReportedAndRecovered(t *testing.T) {
 
 	if !sawUnhealthy.Load() || !c.Healthy() {
 		t.Fatalf("unhealthy seen = %v, healthy now = %v", sawUnhealthy.Load(), c.Healthy())
+	}
+}
+
+func msgWithTrace(id, group, traceparent string) types.Message {
+	m := msg(id, group, "2")
+	if traceparent != "" {
+		m.MessageAttributes = map[string]types.MessageAttributeValue{"traceparent": {DataType: aws.String("String"), StringValue: aws.String(traceparent)}}
+	}
+	return m
+}
+
+func TestEachMessageHasASpanThatContinuesTheSendersTrace(t *testing.T) {
+	const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	tests := []struct {
+		name        string
+		message     types.Message
+		verdict     Verdict
+		wantParent  bool
+		wantOutcome string
+		wantError   bool
+		wantCode    string
+	}{
+		{name: "a handled message continues the senders trace", message: msgWithTrace("a", "g", traceparent), verdict: Verdict{Action: Delete}, wantParent: true, wantOutcome: "delete"},
+		{name: "without a traceparent it starts a trace of its own", message: msgWithTrace("a", "g", ""), verdict: Verdict{Action: Delete}, wantOutcome: "delete"},
+		{name: "a dead letter is a decision, not a service failure", message: msgWithTrace("a", "g", traceparent), verdict: Verdict{Action: DeadLetter, Code: "MALFORMED_MESSAGE"}, wantParent: true, wantOutcome: "dead_letter", wantCode: "MALFORMED_MESSAGE"},
+		{name: "a message to retry is a span error with its cause", message: msgWithTrace("a", "g", traceparent), verdict: Verdict{Action: Retry, Err: errors.New("db down")}, wantParent: true, wantOutcome: "retry", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := spantest.Install(t)
+			q := &fakeQueue{batches: [][]types.Message{{tt.message}}}
+			var handlerTrace string
+			c := NewConsumer(q, handlerFunc(func(ctx context.Context, m Message) Verdict {
+				handlerTrace = trace.SpanContextFromContext(ctx).TraceID().String()
+				return tt.verdict
+			}), testConfig(), quiet())
+			runUntil(t, c, func() bool {
+				d, v, s := q.snapshot()
+				return len(d)+len(v)+len(s) > 0
+			})
+
+			spans := rec.Named("sqs.process")
+			if len(spans) != 1 {
+				t.Fatalf("spans = %d", len(spans))
+			}
+			s, attrs := spans[0], spantest.Attrs(spans[0])
+			if s.SpanKind() != trace.SpanKindConsumer || attrs["messaging.system"] != "aws_sqs" || attrs["messaging.message.id"] != "sqs-a" ||
+				attrs["messaging.destination.name"] != "queue" || attrs["messaging.sqs.receive_count"] != "2" || attrs["messaging.outcome"] != tt.wantOutcome ||
+				attrs["messaging.failure_code"] != tt.wantCode {
+				t.Fatalf("span = %v / %v", s.SpanKind(), attrs)
+			}
+			if tt.wantParent {
+				if s.SpanContext().TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" || s.Parent().SpanID().String() != "00f067aa0ba902b7" || !s.Parent().IsRemote() {
+					t.Fatalf("the span did not continue the senders trace: trace %s, parent %s", s.SpanContext().TraceID(), s.Parent().SpanID())
+				}
+			} else if s.Parent().IsValid() {
+				t.Fatalf("an unexpected parent: %s", s.Parent().SpanID())
+			}
+			if handlerTrace != s.SpanContext().TraceID().String() {
+				t.Fatalf("the handler ran in trace %s, not the message span's %s", handlerTrace, s.SpanContext().TraceID())
+			}
+			if (s.Status().Code == codes.Error) != tt.wantError {
+				t.Fatalf("status = %v, want error = %v", s.Status(), tt.wantError)
+			}
+		})
 	}
 }
