@@ -13,9 +13,10 @@ As decisões de projeto (dinheiro, transações, idempotência, locks, referênc
 5. [Migrations: aplicar e reverter](#migrations-aplicar-e-reverter)
 6. [Autenticação: identidades de teste](#autenticação-identidades-de-teste)
 7. [Exemplos de chamadas](#exemplos-de-chamadas)
-8. [Testes](#testes)
-9. [Estrutura do código](#estrutura-do-código)
-10. [Problemas comuns](#problemas-comuns)
+8. [Tracing (OpenTelemetry)](#tracing-opentelemetry)
+9. [Testes](#testes)
+10. [Estrutura do código](#estrutura-do-código)
+11. [Problemas comuns](#problemas-comuns)
 
 ## Pré-requisitos
 
@@ -66,6 +67,7 @@ O Compose já define todas para o ambiente local. O arquivo [`.env.example`](.en
 | `EVENTS_QUEUE_NAME` / `EVENTS_QUEUE_URL` | `wallet-events.fifo` / vazio | Fila de saída (eventos). A URL, se informada, dispensa a busca pelo nome |
 | `WAGER_QUEUE_NAME` / `WAGER_QUEUE_URL` | `wager-transactions.fifo` / vazio | Fila de entrada |
 | `WAGER_DLQ_NAME` / `WAGER_DLQ_URL` | `wager-transactions-dlq.fifo` / vazio | DLQ da fila de entrada |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | vazio | Liga o tracing e diz para onde exportar (OTLP/HTTP). O resto vem das variáveis `OTEL_*` padrão (`OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`…). Veja [Tracing](#tracing-opentelemetry) |
 | `SQS_SENDER_PROVIDER_MAP` | vazio | `senderId=providerId[,…]`: quem o SQS diz que enviou → qual provedor pode ser. Vazio: toda mensagem vai para a DLQ |
 
 Credenciais da AWS vêm da cadeia padrão do SDK (no Compose: `AWS_ACCESS_KEY_ID=test`, aceito pelo LocalStack).
@@ -237,6 +239,26 @@ curl -s localhost:8081/metrics | grep -E '^(wager_|outbox_|pending_reference|sqs
 
 Cada réplica expõe só o que ela mesma tratou; some as três para o total. As métricas estão listadas no §11 do ARCHITECTURE.md. Os logs saem em JSON, com `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`, e nunca com valores monetários em `INFO`.
 
+## Tracing (OpenTelemetry)
+
+Opcional e **desligado por padrão**: sem um endpoint OTLP o serviço não exporta nada. Para ver as trilhas:
+
+```sh
+make up-tracing        # o mesmo que `make up`, mais um Jaeger, com as 3 réplicas exportando para ele
+```
+
+Faça algumas chamadas (por exemplo, a aposta do exemplo 2) e abra <http://localhost:16686>, serviço `wallet-service`. Uma aposta por HTTP aparece como `POST /wagering/transactions` → `wager.execute` → `db.transaction`; por SQS, como `sqs.process` → `wager.execute` → `db.transaction`; a publicação dos eventos é `outbox.publish` e a retomada de uma pendência, `pending_reference.resolve`.
+
+A trilha continua a do chamador: mande um cabeçalho `traceparent` no HTTP, ou o atributo de mensagem `traceparent` no SQS, e os spans entram nessa trilha (o `traceId` também aparece no log `wager transaction handled`).
+
+```sh
+curl -s -X POST localhost:8081/wagering/transactions -H "Authorization: Bearer $PROVIDER" -H "Idempotency-Key: provider-a:t-1" \
+  -H 'Content-Type: application/json' -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' -d '{…}'
+# Jaeger: http://localhost:16686/trace/4bf92f3577b34da6a3ce929d0e0e4736
+```
+
+Para usar outro coletor, defina `OTEL_EXPORTER_OTLP_ENDPOINT` (por exemplo `http://meu-coletor:4318`) para o serviço; `OTEL_TRACES_SAMPLER=parentbased_traceidratio` com `OTEL_TRACES_SAMPLER_ARG=0.1` amostra 10%. Os spans não levam valores monetários, tokens nem corpos de requisição. Voltar ao normal: `make up` (ou `make down` para parar tudo, Jaeger incluído).
+
 ## Testes
 
 ```sh
@@ -265,10 +287,10 @@ cmd/migrate/               aplica/reverte as migrations (usado pelo Compose)
 internal/domain/           regras puras: money, wallet, wager, event (só biblioteca padrão)
 internal/usecase/          casos de uso: openwallet, processwager, resolvereference, reconcile, queries
 internal/adapter/          httpapi (HTTP) e sqsmsg (envelope SQS → o mesmo comando do HTTP)
-internal/infra/           postgres, sqs, oidc, outbox, refworker, observability, migrations
+internal/infra/           postgres, sqs, oidc, outbox, refworker, observability, telemetry, migrations
 internal/app/              módulos Fx: o único lugar que conhece o Fx
 pkg/                       utilitários genéricos: canonicaljson, backoff, uuid, faultinject
-deploy/                    realm do Keycloak, script de filas do LocalStack, papéis do banco
+deploy/                    realm do Keycloak, script de filas e políticas do LocalStack, papéis do banco
 test/recovery/             a suíte de falhas com processos reais
 ```
 
