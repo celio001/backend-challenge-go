@@ -24,8 +24,10 @@ var Module = fx.Options(
 	SystemModule,
 	PostgresModule,
 	OIDCModule,
+	SQSModule,
 	UseCaseModule,
 	HTTPModule,
+	OutboxModule,
 )
 
 // Fx wiring events are debug noise in production; its failures still surface at error level.
