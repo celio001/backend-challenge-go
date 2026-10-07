@@ -60,14 +60,16 @@ func New(d Deps) http.Handler {
 	admin := func(next http.HandlerFunc) http.Handler { return protected(auth.RoleWalletAdmin, next) }
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /wallets", admin(h.post))
-	mux.Handle("GET /wallets/{id}", admin(h.get))
-	mux.Handle("GET /wallets/{id}/ledger", admin(h.ledger))
-	mux.Handle("POST /wallets/{id}/reconciliation", admin(h.reconciliation))
-	mux.Handle("POST /wagering/transactions", protected(auth.RoleWagerWrite, wg.post))
+	// Business routes get a span each; health and metrics are polled constantly and would only add noise to the traces.
+	route := func(pattern string, h http.Handler) { mux.Handle(pattern, traced(pattern, h)) }
+	route("POST /wallets", admin(h.post))
+	route("GET /wallets/{id}", admin(h.get))
+	route("GET /wallets/{id}/ledger", admin(h.ledger))
+	route("POST /wallets/{id}/reconciliation", admin(h.reconciliation))
+	route("POST /wagering/transactions", protected(auth.RoleWagerWrite, wg.post))
 	// An admin reads any transaction by id; a provider only its own, and the handler hides the rest as 404.
-	mux.Handle("GET /wagering/transactions/{id}", authenticate(d.Verifier, d.Log, requireAnyRole([]string{auth.RoleWagerRead, auth.RoleWalletAdmin}, http.HandlerFunc(wg.get))))
-	mux.Handle("GET /providers/{provider}/wagering/transactions/{external}", protected(auth.RoleWagerRead, wg.getByProvider))
+	route("GET /wagering/transactions/{id}", authenticate(d.Verifier, d.Log, requireAnyRole([]string{auth.RoleWagerRead, auth.RoleWalletAdmin}, http.HandlerFunc(wg.get))))
+	route("GET /providers/{provider}/wagering/transactions/{external}", protected(auth.RoleWagerRead, wg.getByProvider))
 	mux.HandleFunc("GET /health/live", d.Health.live)
 	mux.HandleFunc("GET /health/ready", d.Health.ready)
 	if d.Metrics != nil {
