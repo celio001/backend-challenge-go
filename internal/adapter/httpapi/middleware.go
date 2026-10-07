@@ -65,6 +65,20 @@ func requireRole(role string, next http.Handler) http.Handler {
 	})
 }
 
+func requireAnyRole(roles []string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p, ok := auth.PrincipalFrom(r.Context()); ok {
+			for _, role := range roles {
+				if p.HasRole(role) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+		writeProblem(w, errForbidden)
+	})
+}
+
 func unauthenticated(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="wallet"`)
 	writeProblem(w, errUnauthenticated)
