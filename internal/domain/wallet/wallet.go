@@ -30,7 +30,6 @@ type Wallet struct {
 	updatedAt time.Time
 }
 
-// Open creates an empty wallet at version 1.
 func Open(id WalletID, playerID PlayerID, currency money.Currency, now time.Time) (*Wallet, error) {
 	if err := validateNew(id, playerID, now); err != nil {
 		return nil, err
