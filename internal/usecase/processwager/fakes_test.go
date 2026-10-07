@@ -20,6 +20,8 @@ type fakeStore struct {
 	outbox  []usecase.OutboxEvent
 	nextAt  map[wallet.TxID]time.Time
 	inbox   map[string][]byte // consumer/messageId → hash
+	delays  []time.Duration   // Reschedule calls, in order
+	woken   []string          // provider/externalId of WakeWaiting calls
 
 	doErrs    []error // consumed one per Do call, before fn runs
 	doCalls   int
@@ -88,7 +90,7 @@ func cloneTx(t *wager.Transaction) *wager.Transaction {
 		Amount: t.Amount(), ProviderID: t.ProviderID(), ExternalTransactionID: t.ExternalTransactionID(),
 		IdempotencyKey: t.IdempotencyKey(), PayloadHash: t.PayloadHash(), RoundID: t.RoundID(), GameID: t.GameID(),
 		ReferenceExternalID: t.ReferenceExternalID(), ReferenceTxID: t.ReferenceTxID(), FailureCode: t.FailureCode(),
-		ResultBalance: t.ResultBalance(), CorrelationID: t.CorrelationID(), ExpiresAt: t.ExpiresAt(),
+		ResultBalance: t.ResultBalance(), CorrelationID: t.CorrelationID(), ExpiresAt: t.ExpiresAt(), Attempts: t.Attempts(),
 		CreatedAt: t.CreatedAt(), UpdatedAt: t.UpdatedAt(),
 	})
 	if err != nil {
@@ -230,4 +232,38 @@ func (f fakeInbox) Register(_ context.Context, m usecase.InboxMessage) (bool, er
 		return false, usecase.ErrInboxHashMismatch
 	}
 	return true, nil
+}
+
+func (f fakeTxs) LockPending(_ context.Context, id wallet.TxID) (*wager.Transaction, error) {
+	t, ok := f.s.txs[id]
+	if !ok || t.Status() != wager.StatusPendingReference {
+		return nil, wager.ErrNotFound
+	}
+	return cloneTx(t), nil
+}
+
+func (f fakeTxs) Reschedule(_ context.Context, id wallet.TxID, delay time.Duration) error {
+	t, ok := f.s.txs[id]
+	if !ok || t.Status() != wager.StatusPendingReference {
+		return wager.ErrNotFound
+	}
+	snap := wager.Snapshot{
+		ID: t.ID(), Origin: t.Origin(), Kind: t.Kind(), Status: t.Status(), WalletID: t.WalletID(), PlayerID: t.PlayerID(),
+		Amount: t.Amount(), ProviderID: t.ProviderID(), ExternalTransactionID: t.ExternalTransactionID(),
+		IdempotencyKey: t.IdempotencyKey(), PayloadHash: t.PayloadHash(), RoundID: t.RoundID(), GameID: t.GameID(),
+		ReferenceExternalID: t.ReferenceExternalID(), ReferenceTxID: t.ReferenceTxID(), CorrelationID: t.CorrelationID(),
+		ExpiresAt: t.ExpiresAt(), Attempts: t.Attempts() + 1, CreatedAt: t.CreatedAt(), UpdatedAt: t.UpdatedAt(),
+	}
+	bumped, err := wager.Rehydrate(snap)
+	if err != nil {
+		return err
+	}
+	f.s.txs[id] = bumped
+	f.s.delays = append(f.s.delays, delay)
+	return nil
+}
+
+func (f fakeTxs) WakeWaiting(_ context.Context, provider, ext string) error {
+	f.s.woken = append(f.s.woken, provider+"/"+ext)
+	return nil
 }
