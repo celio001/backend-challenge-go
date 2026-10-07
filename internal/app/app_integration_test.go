@@ -420,6 +420,147 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("every wallet touched by this test reconciles, and only the service can ask", func(t *testing.T) {
+		rows, err := pool.Query(context.Background(), `SELECT id FROM wallets`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wallets []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			wallets = append(wallets, id)
+		}
+		rows.Close()
+		if len(wallets) < 2 {
+			t.Fatalf("wallets = %d, the earlier subtests should have created several", len(wallets))
+		}
+		for _, id := range wallets {
+			r := call(t, http.MethodPost, base+"/wallets/"+id+"/reconciliation", admin, "", "")
+			diff, _ := r.body["difference"].(map[string]any)
+			if r.status != http.StatusOK || r.body["consistent"] != true || diff["amount"] != "0.00" || r.body["walletId"] != id {
+				t.Fatalf("wallet %s: %d %v", id, r.status, r.body)
+			}
+		}
+
+		r := call(t, http.MethodPost, base+"/wallets/"+walletID+"/reconciliation", admin, "", "")
+		stored, _ := r.body["storedBalance"].(map[string]any)
+		calculated, _ := r.body["calculatedBalance"].(map[string]any)
+		if stored["amount"] != calculated["amount"] || stored["currency"] != "BRL" || r.body["checkedEntries"] == nil {
+			t.Fatalf("report = %v", r.body)
+		}
+		if r := call(t, http.MethodPost, base+"/wallets/"+walletID+"/reconciliation", provider, "", ""); r.status != http.StatusForbidden {
+			t.Fatalf("provider token: %d", r.status)
+		}
+		if r := call(t, http.MethodPost, base+"/wallets/"+walletID+"/reconciliation", "", "", ""); r.status != http.StatusUnauthorized {
+			t.Fatalf("no token: %d", r.status)
+		}
+		if r := call(t, http.MethodPost, base+"/wallets/"+newUUID(t)+"/reconciliation", admin, "", ""); r.status != http.StatusNotFound || r.body["code"] != "WALLET_NOT_FOUND" {
+			t.Fatalf("unknown wallet: %d %v", r.status, r.body)
+		}
+		if r := call(t, http.MethodPost, base+"/wallets/not-a-uuid/reconciliation", admin, "", ""); r.status != http.StatusBadRequest || r.body["code"] != "INVALID_ID" {
+			t.Fatalf("invalid id: %d %v", r.status, r.body)
+		}
+	})
+
+	t.Run("metrics are public, cover the traffic so far, and a forced divergence shows in the response, the metric and nowhere else", func(t *testing.T) {
+		scrape := func() string {
+			t.Helper()
+			resp, err := http.Get(base + "/metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("/metrics status = %d", resp.StatusCode)
+			}
+			return string(raw)
+		}
+		value := func(body, series string) float64 {
+			t.Helper()
+			for _, line := range strings.Split(body, "\n") {
+				if strings.HasPrefix(line, series+" ") {
+					var v float64
+					if _, err := fmt.Sscanf(strings.TrimPrefix(line, series+" "), "%g", &v); err != nil {
+						t.Fatalf("series %s: %v", series, err)
+					}
+					return v
+				}
+			}
+			t.Fatalf("series %s is not exposed:\n%s", series, body)
+			return 0
+		}
+
+		body := scrape()
+		if v := value(body, `wager_transactions_total{channel="http",failure_code="",kind="BET",status="PROCESSED"}`); v < 1 {
+			t.Fatalf("processed HTTP bets = %v", v)
+		}
+		if v := value(body, `wager_transactions_total{channel="http",failure_code="INSUFFICIENT_FUNDS",kind="BET",status="REJECTED"}`); v < 1 {
+			t.Fatalf("rejected HTTP bets = %v", v)
+		}
+		if v := value(body, `wager_idempotent_replays_total{channel="http"}`); v < 1 {
+			t.Fatalf("replays = %v", v)
+		}
+		if v := value(body, `wager_idempotency_conflicts_total{reason="key_reused"}`); v < 1 {
+			t.Fatalf("key reuse conflicts = %v", v)
+		}
+		if v := value(body, `outbox_publish_attempts_total{result="published"}`); v < 1 {
+			t.Fatalf("published events = %v", v)
+		}
+		if v := value(body, `wallet_lock_wait_seconds_count`); v < 1 {
+			t.Fatalf("wallet lock waits observed = %v", v)
+		}
+		if v := value(body, `wager_processing_duration_seconds_count{channel="http",kind="BET"}`); v < 1 {
+			t.Fatalf("durations observed = %v", v)
+		}
+		if v := value(body, `outbox_pending_events`); v < 0 {
+			t.Fatalf("outbox backlog = %v", v)
+		}
+		if v := value(body, `pending_reference_open`); v < 0 {
+			t.Fatalf("open pending references = %v", v)
+		}
+		if v := value(body, `wallet_reconciliation_divergence_total`); v != 0 {
+			t.Fatalf("divergences before any tampering = %v, want 0", v)
+		}
+		if strings.Contains(body, "Bearer") || strings.Contains(body, "playerId") {
+			t.Fatal("the metrics expose request data")
+		}
+
+		// Only the table owner can break the balance/ledger agreement: triggers are switched off for that session.
+		tamper, err := pool.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tamper.Exec(context.Background(), `SET LOCAL session_replication_role = replica`); err != nil {
+			t.Skipf("this role cannot disable triggers: %v", err)
+		}
+		if _, err := tamper.Exec(context.Background(), `UPDATE wallets SET balance_minor = balance_minor + 500 WHERE id = $1`, walletID); err != nil {
+			t.Fatal(err)
+		}
+		if err := tamper.Commit(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		r := call(t, http.MethodPost, base+"/wallets/"+walletID+"/reconciliation", admin, "", "")
+		diff, _ := r.body["difference"].(map[string]any)
+		if r.status != http.StatusOK || r.body["consistent"] != false || diff["amount"] != "5.00" {
+			t.Fatalf("divergent reconciliation = %d %v", r.status, r.body)
+		}
+		if v := value(scrape(), `wallet_reconciliation_divergence_total`); v != 1 {
+			t.Fatalf("divergences after the tampering = %v, want 1", v)
+		}
+		// Reconciling is read-only: asking again finds the same divergence, and the balance was not touched.
+		if again := call(t, http.MethodPost, base+"/wallets/"+walletID+"/reconciliation", admin, "", ""); again.body["consistent"] != false {
+			t.Fatalf("second reconciliation = %v", again.body)
+		}
+		if v := value(scrape(), `wallet_reconciliation_divergence_total`); v != 2 {
+			t.Fatalf("divergences after two checks = %v, want 2", v)
+		}
+	})
+
 	t.Run("health endpoints are public", func(t *testing.T) {
 		if r := call(t, http.MethodGet, base+"/health/live", "", "", ""); r.status != http.StatusOK || r.body["status"] != "UP" {
 			t.Fatalf("live: status = %d, body = %v", r.status, r.body)
