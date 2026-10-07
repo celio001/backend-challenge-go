@@ -9,6 +9,12 @@ x-app: &app
     OIDC_ISSUER: http://localhost:8080/realms/wallet
     OIDC_DISCOVERY_URL: http://keycloak:8080/realms/wallet
     OIDC_AUDIENCE: wallet-api
+    AWS_REGION: us-east-1
+    # LocalStack accepts any credentials; real AWS would use a role instead.
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    SQS_ENDPOINT: http://localstack:4566
+    EVENTS_QUEUE_NAME: wallet-events.fifo
   networks:
     - backend-challenge-go
   depends_on: &app-deps
