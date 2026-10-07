@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -21,6 +22,8 @@ type Received struct {
 	GroupID   string
 	EventID   string
 	EventType string
+	// FailureCode is set on messages dead-lettered by the consumer.
+	FailureCode string
 }
 
 type Queue struct {
@@ -31,6 +34,29 @@ type Queue struct {
 
 // New creates a FIFO queue and deletes it when the test ends. It skips the test when TEST_SQS_ENDPOINT is unset.
 func New(t *testing.T) Queue {
+	t.Helper()
+	return create(t, map[string]string{"VisibilityTimeout": "30"})
+}
+
+// NewInbound creates a queue shaped like wager-transactions.fifo: it redrives to its own DLQ after 5 receives.
+// A short visibility lets tests wait for a redelivery.
+func NewInbound(t *testing.T, visibilitySeconds int) (queue, dlq Queue) {
+	t.Helper()
+	dlq = create(t, map[string]string{"MessageRetentionPeriod": "1209600"})
+	arn, err := dlq.Client.GetQueueAttributes(context.Background(), &awssqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(dlq.URL), AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue = create(t, map[string]string{
+		"VisibilityTimeout": fmt.Sprint(visibilitySeconds),
+		"RedrivePolicy":     fmt.Sprintf(`{"deadLetterTargetArn":%q,"maxReceiveCount":"5"}`, arn.Attributes["QueueArn"]),
+	})
+	return queue, dlq
+}
+
+func create(t *testing.T, attrs map[string]string) Queue {
 	t.Helper()
 	endpoint := os.Getenv("TEST_SQS_ENDPOINT")
 	if endpoint == "" {
@@ -48,10 +74,11 @@ func New(t *testing.T) Queue {
 	if _, err := rand.Read(suffix); err != nil {
 		t.Fatal(err)
 	}
+	attrs["FifoQueue"], attrs["ContentBasedDeduplication"] = "true", "false"
 	name := "test-" + hex.EncodeToString(suffix) + ".fifo"
 	out, err := client.CreateQueue(ctx, &awssqs.CreateQueueInput{
 		QueueName:  aws.String(name),
-		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "30"},
+		Attributes: attrs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -86,10 +113,11 @@ func (q Queue) Drain(t *testing.T) []Received {
 		empty = 0
 		for _, m := range out.Messages {
 			all = append(all, Received{
-				Body:      aws.ToString(m.Body),
-				GroupID:   m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)],
-				EventID:   aws.ToString(m.MessageAttributes["eventId"].StringValue),
-				EventType: aws.ToString(m.MessageAttributes["eventType"].StringValue),
+				Body:        aws.ToString(m.Body),
+				GroupID:     m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)],
+				EventID:     aws.ToString(m.MessageAttributes["eventId"].StringValue),
+				EventType:   aws.ToString(m.MessageAttributes["eventType"].StringValue),
+				FailureCode: aws.ToString(m.MessageAttributes["failureCode"].StringValue),
 			})
 			if _, err := q.Client.DeleteMessage(ctx, &awssqs.DeleteMessageInput{QueueUrl: aws.String(q.URL), ReceiptHandle: m.ReceiptHandle}); err != nil {
 				t.Fatal(err)
