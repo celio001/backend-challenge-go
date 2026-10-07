@@ -40,6 +40,10 @@ test: ## Run tests
 test-integration: ## Run integration tests (TEST_DATABASE_URL: Postgres superuser; TEST_KEYCLOAK_URL: Keycloak with the wallet realm; TEST_SQS_ENDPOINT: LocalStack)
 	TEST_DATABASE_URL=$(TEST_DATABASE_URL) TEST_KEYCLOAK_URL=$(TEST_KEYCLOAK_URL) TEST_SQS_ENDPOINT=$(TEST_SQS_ENDPOINT) $(GO) test -tags integration -count=1 -race -timeout 5m ./internal/...
 
+.PHONY: test-recovery
+test-recovery: ## Run the failure suite: 3 real processes sharing one database and queue, killed at chosen points (same environment as test-integration)
+	TEST_DATABASE_URL=$(TEST_DATABASE_URL) TEST_KEYCLOAK_URL=$(TEST_KEYCLOAK_URL) TEST_SQS_ENDPOINT=$(TEST_SQS_ENDPOINT) $(GO) test -tags 'integration faultinject' -count=1 -race -timeout 15m ./test/recovery/...
+
 migrate-up: ## Run migrations up
 	goose -dir $(MIGRATIONS_DIR) postgres "$(DB_URL)" up
 
