@@ -37,6 +37,8 @@ type Input struct {
 	// CorrelationID and CausationID are transport metadata: they never enter the idempotency hash.
 	CorrelationID string
 	CausationID   string
+	// Inbox is set by the SQS entry point: the message is registered in the same unit of work as the operation.
+	Inbox *usecase.InboxMessage
 }
 
 type Output struct {
@@ -113,6 +115,18 @@ func (uc *UseCase) Execute(ctx context.Context, in Input) (Output, error) {
 func (uc *UseCase) once(ctx context.Context, c command) (Output, error) {
 	var out Output
 	err := uc.uow.Do(ctx, func(ctx context.Context, tx usecase.Repos) error {
+		if c.in.Inbox != nil {
+			m := *c.in.Inbox
+			m.ReceivedAt = uc.clock.Now()
+			duplicate, err := tx.Inbox().Register(ctx, m)
+			if err != nil {
+				return err
+			}
+			if duplicate {
+				out = Output{Replay: true}
+				return nil
+			}
+		}
 		t, err := uc.newTransaction(c)
 		if err != nil {
 			return err
