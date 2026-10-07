@@ -4,6 +4,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/celio001/backend-challenge-go/internal/adapter/httpapi"
+	"github.com/celio001/backend-challenge-go/internal/adapter/sqsmsg"
 	"github.com/celio001/backend-challenge-go/internal/usecase/openwallet"
 	"github.com/celio001/backend-challenge-go/internal/usecase/processwager"
 	"github.com/celio001/backend-challenge-go/internal/usecase/queries"
@@ -16,6 +17,8 @@ var UseCaseModule = fx.Module("usecase",
 		func(q *queries.Queries) httpapi.WalletQueries { return q },
 		func(q *queries.Queries) httpapi.TransactionQueries { return q },
 		func(cfg Config) processwager.Options { return processwager.Options{ReferenceTTL: cfg.ReferenceTTL} },
-		fx.Annotate(processwager.New, fx.As(new(httpapi.ProcessWager))),
+		processwager.New,
+		func(uc *processwager.UseCase) httpapi.ProcessWager { return uc },
+		func(uc *processwager.UseCase) sqsmsg.ProcessWager { return uc },
 	),
 )
