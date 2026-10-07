@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/celio001/backend-challenge-go/pkg/backoff"
+	"github.com/celio001/backend-challenge-go/pkg/faultinject"
 )
 
 type Action int
@@ -38,9 +39,25 @@ type Verdict struct {
 	Action Action
 	// Code is sent to the DLQ with the message.
 	Code string
+	// Replay marks a Delete of work that was already done.
+	Replay bool
 	// BusinessID and Err are only for logs.
 	BusinessID string
 	Err        error
+}
+
+// Outcomes reported to the Observer.
+const (
+	OutcomeDeleted          = "deleted"
+	OutcomeDuplicate        = "duplicate"
+	OutcomeRetried          = "retried"
+	OutcomeDeadLettered     = "dead_lettered"
+	OutcomeDeadLetterFailed = "dead_letter_failed"
+)
+
+type Observer interface {
+	Message(outcome string)
+	ReceiveError()
 }
 
 type Handler interface {
@@ -68,6 +85,8 @@ type ConsumerConfig struct {
 	RetryBackoffMax time.Duration
 	// ReceiveBackoffMax bounds the wait after a failed receive.
 	ReceiveBackoffMax time.Duration
+	// Observer is optional.
+	Observer Observer
 }
 
 func (c *ConsumerConfig) setDefaults() {
@@ -137,6 +156,9 @@ func (c *Consumer) Run(ctx context.Context) {
 				break
 			}
 			c.healthy.Store(false)
+			if c.cfg.Observer != nil {
+				c.cfg.Observer.ReceiveError()
+			}
 			c.log.Error("receive messages", "error", err)
 			select {
 			case <-ctx.Done():
@@ -217,6 +239,10 @@ func (c *Consumer) processOne(work context.Context, m types.Message) Action {
 	stopBeat := c.heartbeat(m)
 	v := c.handler.Handle(work, msg)
 	stopBeat()
+	if v.Action != Retry {
+		// The outcome is durable (or final) but the message is still on the queue: the worst moment to die.
+		faultinject.Hit("after_commit_before_sqs_delete")
+	}
 
 	// Settling must work even when work was canceled: a committed message that stays on the queue is only redelivered noise.
 	settle, cancel := context.WithTimeout(context.WithoutCancel(work), 5*time.Second)
@@ -228,13 +254,21 @@ func (c *Consumer) processOne(work context.Context, m types.Message) Action {
 		if err := c.delete(settle, m); err != nil {
 			log.Error("delete message", "error", err)
 		}
+		if v.Replay {
+			c.observe(OutcomeDuplicate)
+		} else {
+			c.observe(OutcomeDeleted)
+		}
 	case DeadLetter:
 		if err := c.deadLetter(settle, m, v.Code); err != nil {
 			log.Error("dead-letter message", "error", err)
+			c.observe(OutcomeDeadLetterFailed)
 			return Retry
 		}
+		c.observe(OutcomeDeadLettered)
 		log.Warn("message dead-lettered", "error", v.Err)
 	default:
+		c.observe(OutcomeRetried)
 		delay := time.Duration(0)
 		if work.Err() == nil {
 			delay = backoff.Delay(msg.ReceiveCount, time.Second, c.cfg.RetryBackoffMax, 0)
@@ -245,6 +279,12 @@ func (c *Consumer) processOne(work context.Context, m types.Message) Action {
 		log.Warn("message will be retried", "delay", delay, "error", v.Err)
 	}
 	return v.Action
+}
+
+func (c *Consumer) observe(outcome string) {
+	if c.cfg.Observer != nil {
+		c.cfg.Observer.Message(outcome)
+	}
 }
 
 func (c *Consumer) heartbeat(m types.Message) (stop func()) {
