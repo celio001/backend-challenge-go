@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/celio001/backend-challenge-go/internal/infra/telemetry"
 )
 
 var ErrInvalidConfig = errors.New("app: invalid configuration")
@@ -33,6 +35,8 @@ type Config struct {
 	// OutboxLease and ReferenceLease are how long a replica keeps the work it claimed before another may take it over.
 	OutboxLease    time.Duration
 	ReferenceLease time.Duration
+	// TracingEnabled is on when an OTLP endpoint is configured; the exporter itself is configured by the standard OTEL_* variables.
+	TracingEnabled bool
 }
 
 func LoadConfig(getenv func(string) string) (Config, error) {
@@ -56,6 +60,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.SenderProviders = senders
+	cfg.TracingEnabled = telemetry.Enabled(getenv)
 	ttl, err := time.ParseDuration(withDefault(getenv("REFERENCE_TTL"), "10m"))
 	if err != nil || ttl <= 0 {
 		return Config{}, fmt.Errorf("%w: REFERENCE_TTL must be a positive duration such as 10m", ErrInvalidConfig)
