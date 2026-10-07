@@ -14,8 +14,10 @@ import (
 
 	"github.com/celio001/backend-challenge-go/internal/auth"
 	"github.com/celio001/backend-challenge-go/internal/domain/money"
+	"github.com/celio001/backend-challenge-go/internal/domain/wager"
 	"github.com/celio001/backend-challenge-go/internal/domain/wallet"
 	"github.com/celio001/backend-challenge-go/internal/usecase/openwallet"
+	"github.com/celio001/backend-challenge-go/internal/usecase/processwager"
 	"github.com/celio001/backend-challenge-go/internal/usecase/queries"
 )
 
@@ -87,21 +89,59 @@ func testWallet(t *testing.T, balance int64, version int64) *wallet.Wallet {
 	return w
 }
 
+type fakeProcess struct {
+	calls []processwager.Input
+	out   processwager.Output
+	err   error
+}
+
+func (f *fakeProcess) Execute(_ context.Context, in processwager.Input) (processwager.Output, error) {
+	f.calls = append(f.calls, in)
+	return f.out, f.err
+}
+
+type fakeTxQueries struct {
+	calls int
+	tx    *wager.Transaction
+	err   error
+}
+
+func (f *fakeTxQueries) Transaction(context.Context, string) (*wager.Transaction, error) {
+	f.calls++
+	return f.tx, f.err
+}
+
+func (f *fakeTxQueries) ProviderTransaction(context.Context, string, string) (*wager.Transaction, error) {
+	f.calls++
+	return f.tx, f.err
+}
+
 type env struct {
 	h       http.Handler
 	open    *fakeOpen
 	queries *fakeQueries
+	process *fakeProcess
+	txq     *fakeTxQueries
 }
 
 func newEnv(t *testing.T) env {
 	t.Helper()
-	e := env{open: &fakeOpen{w: testWallet(t, 100000, 1)}, queries: &fakeQueries{w: testWallet(t, 97500, 2)}}
+	e := env{
+		open: &fakeOpen{w: testWallet(t, 100000, 1)}, queries: &fakeQueries{w: testWallet(t, 97500, 2)},
+		process: &fakeProcess{}, txq: &fakeTxQueries{},
+	}
 	e.h = New(Deps{
-		OpenWallet: e.open,
-		Queries:    e.queries,
+		OpenWallet:   e.open,
+		ProcessWager: e.process,
+		Queries:      e.queries,
+		TxQueries:    e.txq,
 		Verifier: fakeVerifier{
-			"admin":    {Subject: "svc", Roles: []string{auth.RoleWalletAdmin}},
-			"provider": {Subject: "prov", ProviderID: "provider-a", Roles: []string{auth.RoleWagerWrite, auth.RoleWagerRead}},
+			"admin":       {Subject: "svc", Roles: []string{auth.RoleWalletAdmin}},
+			"provider":    {Subject: "prov", ProviderID: "provider-a", Roles: []string{auth.RoleWagerWrite, auth.RoleWagerRead}},
+			"provider-b":  {Subject: "prov-b", ProviderID: "provider-b", Roles: []string{auth.RoleWagerWrite, auth.RoleWagerRead}},
+			"write-only":  {Subject: "w", ProviderID: "provider-a", Roles: []string{auth.RoleWagerWrite}},
+			"read-only":   {Subject: "r", ProviderID: "provider-a", Roles: []string{auth.RoleWagerRead}},
+			"no-provider": {Subject: "np", Roles: []string{auth.RoleWagerWrite, auth.RoleWagerRead}},
 		},
 		IDs:    seqIDs{},
 		Health: NewHealth(),
