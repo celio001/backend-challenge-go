@@ -11,13 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.26.5
-      
+          go-version-file: go.mod
+
       - name: Install dependencies
         run: go mod download
 
@@ -25,3 +25,41 @@ jobs:
         run: |
           go mod tidy
           go test ./... -count=1 -v ./... -race
+
+  run-integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Start Postgres, Keycloak and LocalStack
+        run: docker compose up -d --wait --wait-timeout 300 postgres keycloak localstack
+
+      - name: Run integration tests
+        run: |
+          set -o pipefail
+          make test-integration 2>&1 | tee integration.log
+          if grep -q -- '--- SKIP' integration.log; then
+            echo "integration tests were skipped:"
+            grep -B1 -A2 -- '--- SKIP' integration.log
+            exit 1
+          fi
+        env:
+          GOFLAGS: -v
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs --no-color postgres keycloak localstack
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
