@@ -17,7 +17,6 @@ var (
 	ErrForbidden       = errors.New("auth: not allowed")
 )
 
-// Principal is the authenticated caller; ProviderID comes from the token and is the only trusted provider identity.
 type Principal struct {
 	Subject    string
 	ProviderID string
@@ -28,7 +27,6 @@ func (p Principal) HasRole(role string) bool {
 	return slices.Contains(p.Roles, role)
 }
 
-// Verifier turns a raw bearer token into a Principal, or ErrUnauthenticated.
 type Verifier interface {
 	Verify(ctx context.Context, rawToken string) (Principal, error)
 }
