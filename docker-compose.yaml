@@ -10,17 +10,13 @@ x-app: &app
     OIDC_DISCOVERY_URL: http://keycloak:8080/realms/wallet
     OIDC_AUDIENCE: wallet-api
     AWS_REGION: us-east-1
-    # LocalStack accepts any credentials; real AWS would use a role instead.
     AWS_ACCESS_KEY_ID: test
     AWS_SECRET_ACCESS_KEY: test
     SQS_ENDPOINT: http://localstack:4566
     EVENTS_QUEUE_NAME: wallet-events.fifo
     WAGER_QUEUE_NAME: wager-transactions.fifo
     WAGER_DLQ_NAME: wager-transactions-dlq.fifo
-    # LocalStack reports its account id as the SenderId of every message, so locally only one provider can be mapped.
-    # On AWS, map each provider's IAM principal id to its provider id.
     SQS_SENDER_PROVIDER_MAP: "000000000000=provider-a"
-    # Tracing is off unless an OTLP endpoint is given (`make up-tracing` points it at the jaeger service below).
     OTEL_SERVICE_NAME: wallet-service
     OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   networks:
