@@ -2,21 +2,22 @@
 
 Serviço em Go (Uber Fx) que processa operações financeiras de provedores de jogos (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) sobre carteiras de jogadores, por **HTTP** e por **fila SQS**, com várias réplicas idênticas. O PostgreSQL é a fonte da verdade e coordena as réplicas; Keycloak autentica; eventos de saída saem por *transactional outbox*.
 
-As decisões de projeto (dinheiro, transações, idempotência, locks, referências pendentes, reversões, inbox/outbox, autenticação, Fx, desligamento, limitações) estão em [`.claude/ARCHITECTURE.md`](.claude/ARCHITECTURE.md). O enunciado está em [`.claude/backend-challenge-go.md`](.claude/backend-challenge-go.md).
+As decisões de projeto (dinheiro, transações, idempotência, locks, referências pendentes, reversões, inbox/outbox, autenticação, Fx, desligamento, limitações) estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Sumário
 
 1. [Pré-requisitos](#pré-requisitos)
 2. [Subir o ambiente](#subir-o-ambiente)
 3. [Variáveis de ambiente](#variáveis-de-ambiente)
-4. [Filas SQS](#filas-sqs)
-5. [Migrations: aplicar e reverter](#migrations-aplicar-e-reverter)
+4. [Migrations: aplicar e reverter](#migrations-aplicar-e-reverter)
+5. [Rotas](#rotas)
 6. [Autenticação: identidades de teste](#autenticação-identidades-de-teste)
 7. [Exemplos de chamadas](#exemplos-de-chamadas)
 8. [Tracing (OpenTelemetry)](#tracing-opentelemetry)
-9. [Testes](#testes)
-10. [Estrutura do código](#estrutura-do-código)
-11. [Problemas comuns](#problemas-comuns)
+9. [Métricas e logs: Prometheus, Loki e Grafana](#métricas-e-logs-prometheus-loki-e-grafana)
+10. [Testes](#testes)
+11. [Estrutura do código](#estrutura-do-código)
+12. [Problemas comuns](#problemas-comuns)
 
 ## Pré-requisitos
 
@@ -24,7 +25,7 @@ As decisões de projeto (dinheiro, transações, idempotência, locks, referênc
 |---|---|
 | Subir o ambiente | Docker com Compose v2 (testado com 5.x) e `make` |
 | Rodar os testes | Go 1.26.5 (a versão está no `go.mod` e no `Dockerfile`) e o ambiente acima de pé |
-| Os exemplos deste README | `curl` e um shell POSIX (`sed` e `uuidgen` vêm no macOS e no Linux) |
+| Os exemplos deste README | Postman (ou outro cliente HTTP); os exemplos de fila usam um shell POSIX |
 | Migrations pelo `make migrate-*` no host (opcional) | [`goose`](https://github.com/pressly/goose) instalado. Pelo Compose não precisa de nada |
 
 Portas usadas no host: `8080` (Keycloak), `8081`–`8083` (as três réplicas), `4566` (LocalStack) e `5432` (Postgres). Se a `5432` estiver ocupada, veja [Problemas comuns](#problemas-comuns).
@@ -36,13 +37,6 @@ make up          # o mesmo que: docker compose up --build -d
 ```
 
 Isso constrói a imagem e sobe, nesta ordem: Postgres → `db-init` (cria os papéis `wallet_owner` e `wallet_app`) → `migrate` (aplica as migrations, uma vez) → as **3 réplicas** do serviço, e em paralelo Keycloak (já com o realm `wallet` importado) e LocalStack (já com as filas criadas). Do zero leva cerca de um minuto; o Keycloak é o mais lento.
-
-Confira que as três réplicas estão prontas:
-
-```sh
-for p in 8081 8082 8083; do curl -s localhost:$p/health/ready; echo; done
-# {"checks":{"postgres":"up","sqs":"up","sqs-inbound":"up"},"status":"UP"}
-```
 
 Para parar mantendo o banco: `make down`. Para recomeçar do zero, apagando também o volume do Postgres: `docker compose down -v`.
 
@@ -72,26 +66,9 @@ O Compose já define todas para o ambiente local. O arquivo [`.env.example`](.en
 
 Credenciais da AWS vêm da cadeia padrão do SDK (no Compose: `AWS_ACCESS_KEY_ID=test`, aceito pelo LocalStack).
 
-**Só do Compose** (todas opcionais): `POSTGRES_PASSWORD`, `POSTGRES_PORT`, `WALLET_OWNER_PASSWORD`, `WALLET_APP_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`.
+**Só do Compose** (todas opcionais): `POSTGRES_PASSWORD`, `POSTGRES_PORT`, `WALLET_OWNER_PASSWORD`, `WALLET_APP_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`.
 
 **Dos testes**: `TEST_DATABASE_URL`, `TEST_KEYCLOAK_URL`, `TEST_SQS_ENDPOINT` (o `Makefile` já traz valores locais).
-
-## Filas SQS
-
-Nada a fazer: o script [`deploy/localstack-init.sh`](deploy/localstack-init.sh) roda sozinho quando o LocalStack fica pronto (e de novo a cada reinício, é idempotente) e cria:
-
-| Fila | Configuração |
-|---|---|
-| `wager-transactions.fifo` | Entrada. Visibilidade 30 s, long polling 20 s, redrive para a DLQ após **5** recebimentos |
-| `wager-transactions-dlq.fifo` | DLQ, retenção de 14 dias |
-| `wallet-events.fifo` | Saída: eventos da outbox |
-
-Para conferir ou recriar manualmente:
-
-```sh
-docker compose exec localstack awslocal sqs list-queues
-docker compose restart localstack     # roda o script de novo
-```
 
 ## Migrations: aplicar e reverter
 
@@ -104,6 +81,93 @@ make compose-migrate-down      # reverte UMA migration (repita para voltar mais)
 ```
 
 Fora do Compose, com `goose` instalado e o Postgres acessível em `DB_HOST`/`DB_PORT` (veja o `Makefile`): `make migrate-up`, `make migrate-down`, `make migrate-status`, `make migrate-reset`, `make migrate-create`.
+
+## Rotas
+
+### Aplicação
+
+Cada réplica atende em uma porta: `http://localhost:8081`, `:8082` e `:8083`. As três expõem as mesmas rotas e compartilham o mesmo banco.
+
+| Método | Rota | Papel exigido | Para quê |
+|---|---|---|---|
+| `POST` | `/wallets` | `wallet:admin` | Abre uma carteira com saldo inicial (pode ser `"0.00"`) |
+| `GET` | `/wallets/{walletId}` | `wallet:admin` | Saldo e versão da carteira |
+| `GET` | `/wallets/{walletId}/ledger?cursor=…&limit=50` | `wallet:admin` | Extrato paginado (cursor opaco em `nextCursor`, `limit` de 1 a 200) |
+| `POST` | `/wallets/{walletId}/reconciliation` | `wallet:admin` | Compara o saldo com o extrato, sem alterar nada |
+| `POST` | `/wagering/transactions` | `wager:write` | Envia uma operação (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`); exige `Idempotency-Key` |
+| `GET` | `/wagering/transactions/{transactionId}` | `wager:read` (só as próprias) ou `wallet:admin` | Consulta uma transação pelo ID interno |
+| `GET` | `/providers/{providerId}/wagering/transactions/{externalTransactionId}` | `wager:read`, com `providerId` igual ao do token | Consulta uma transação pelo ID externo do provedor |
+| `GET` | `/health/live` | Pública | O processo está respondendo |
+| `GET` | `/health/ready` | Pública | Postgres e filas SQS acessíveis |
+| `GET` | `/metrics` | Pública | Métricas no formato Prometheus |
+
+Todas as rotas que exigem papel precisam do cabeçalho `Authorization: Bearer <token>`.
+
+### Keycloak
+
+Base: `http://localhost:8080`, realm `wallet`.
+
+| Método | Rota | Para quê |
+|---|---|---|
+| `POST` | `/realms/wallet/protocol/openid-connect/token` | Emite o token (`grant_type=client_credentials`, `client_id`, `client_secret`) |
+| `GET` | `/realms/wallet/.well-known/openid-configuration` | Documento de descoberta OIDC (emissor, endpoints, algoritmos) |
+| `GET` | `/realms/wallet/protocol/openid-connect/certs` | Chaves públicas (JWKS) que o serviço usa para validar a assinatura |
+| `GET` | `/admin` | Console de administração (`admin` / `admin`) |
+
+### Exemplo de request
+
+Uma aposta de ponta a ponta: obter o token do provedor e enviar a operação.
+
+**1. Token** (`client_credentials` do `provider-a`):
+
+```http
+POST http://localhost:8080/realms/wallet/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id=provider-a&client_secret=provider-a-secret
+```
+
+```json
+{"access_token":"eyJ...","expires_in":300,"token_type":"Bearer","scope":"profile email"}
+```
+
+**2. Operação** (a carteira precisa existir; veja o exemplo 1 de [Exemplos de chamadas](#exemplos-de-chamadas)):
+
+```http
+POST http://localhost:8081/wagering/transactions
+Authorization: Bearer eyJ...
+Idempotency-Key: provider-a:transaction-123
+Content-Type: application/json
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "transaction-123",
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+  "roundId": "round-987",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": { "amount": "25.00", "currency": "BRL" }
+}
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Correlation-Id: 01a11db2-ab17-765a-b636-49247517d36a
+
+{"transactionId":"01a11db2-ab17-7b9f-9798-916c5fc3ba44","status":"PROCESSED","balance":{"amount":"975.00","currency":"BRL"},"idempotentReplay":false}
+```
+
+O `providerId` do corpo precisa ser o mesmo do token, senão a resposta é `403`. Para uma reversão (`REFUND` ou `ROLLBACK`), acrescente `"referenceExternalTransactionId"` ao corpo. Sem token, a resposta é:
+
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/problem+json
+Www-Authenticate: Bearer realm="wallet"
+
+{"type":"https://wallet.local/problems/unauthenticated","title":"Authentication required","status":401,"code":"UNAUTHENTICATED"}
+```
 
 ## Autenticação: identidades de teste
 
@@ -118,45 +182,170 @@ O realm `wallet` é importado de [`deploy/keycloak-realm.json`](deploy/keycloak-
 
 O `providerId` vem do token (claim `provider_id`), nunca do corpo: um provedor que mande outro `providerId` no corpo recebe `403`. O console do Keycloak fica em <http://localhost:8080> (`admin` / `admin`).
 
-Função auxiliar para pegar tokens (os exemplos abaixo a usam):
-
-```sh
-token() { curl -s -d grant_type=client_credentials -d client_id="$1" -d client_secret="$2" \
-  http://localhost:8080/realms/wallet/protocol/openid-connect/token | sed -E 's/.*"access_token":"([^"]+)".*/\1/'; }
-ADMIN=$(token wallet-internal wallet-internal-secret)
-PROVIDER=$(token provider-a provider-a-secret)
-```
-
 Os tokens duram 5 minutos; se uma chamada devolver `401`, gere de novo.
 
 ## Exemplos de chamadas
 
-Os valores monetários são sempre strings com duas casas (`"25.00"`). Respostas de erro seguem `application/problem+json` com um `code` estável.
+Os exemplos abaixo são pensados para o **Postman** (ou Insomnia, Bruno etc.). Valores monetários são sempre strings com duas casas (`"25.00"`), e respostas de erro seguem `application/problem+json` com um campo `code` estável.
 
-**1. Abrir uma carteira** (só o serviço interno):
+### Preparando o Postman
 
-```sh
-PLAYER=$(uuidgen | tr 'A-Z' 'a-z')
-WALLET=$(curl -s -X POST localhost:8081/wallets -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
-  -d "{\"playerId\":\"$PLAYER\",\"initialBalance\":{\"amount\":\"1000.00\",\"currency\":\"BRL\"}}" | sed -E 's/.*"id":"([^"]+)".*/\1/')
-curl -s localhost:8081/wallets/$WALLET -H "Authorization: Bearer $ADMIN"
-# {"id":"…","playerId":"…","balance":{"amount":"1000.00","currency":"BRL"},"version":1,…}
-```
+**1. Crie um environment** com estas variáveis:
 
-**2. Enviar uma aposta por HTTP** (o cabeçalho `Idempotency-Key` é obrigatório):
+| Variável | Valor inicial |
+|---|---|
+| `baseUrl` | `http://localhost:8081` (troque para `8082` ou `8083` para falar com outra réplica) |
+| `tokenUrl` | `http://localhost:8080/realms/wallet/protocol/openid-connect/token` |
+| `walletId` | vazio (preenchido pelo passo 1 abaixo) |
+| `playerId` | vazio (preenchido pelo passo 1 abaixo) |
 
-```sh
-bet() { # $1 = id externo, $2 = tipo, $3 = valor, $4 = referência (opcional)
-  ref=""; [ -n "$4" ] && ref=",\"referenceExternalTransactionId\":\"$4\""
-  curl -s -w ' [%{http_code}]\n' -X POST localhost:8081/wagering/transactions \
-    -H "Authorization: Bearer $PROVIDER" -H "Idempotency-Key: provider-a:$1" -H 'Content-Type: application/json' \
-    -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$1\",\"playerId\":\"$PLAYER\",\"walletId\":\"$WALLET\",\"roundId\":\"round-1\",\"gameId\":\"game-1\",\"kind\":\"$2\",\"money\":{\"amount\":\"$3\",\"currency\":\"BRL\"}$ref}"
+**2. Configure a autenticação.** São dois tokens diferentes, e usar o errado é a causa mais comum de `403`:
+
+| Requests | Token de | Por quê |
+|---|---|---|
+| `/wallets/...` | `wallet-internal` | Só o serviço interno (`wallet:admin`) abre e lê carteiras |
+| `/wagering/...` e `/providers/...` | `provider-a` | Só provedores (`wager:write`, `wager:read`) enviam operações |
+
+O jeito mais simples é criar duas pastas na collection, **Interno** e **Provedor A**, e configurar a aba **Authorization** de cada pasta (os requests herdam com *Inherit auth from parent*):
+
+| Campo | Pasta Interno | Pasta Provedor A |
+|---|---|---|
+| Type | OAuth 2.0 | OAuth 2.0 |
+| Grant type | Client Credentials | Client Credentials |
+| Access Token URL | `{{tokenUrl}}` | `{{tokenUrl}}` |
+| Client ID | `wallet-internal` | `provider-a` |
+| Client Secret | `wallet-internal-secret` | `provider-a-secret` |
+| Client Authentication | Send client credentials in body | Send client credentials in body |
+
+Clique em **Get New Access Token** → **Use Token**. O token vale 5 minutos; se um request devolver `401`, gere outro. As demais identidades de teste estão em [Autenticação](#autenticação-identidades-de-teste).
+
+### 1. Abrir uma carteira (pasta Interno)
+
+```http
+POST {{baseUrl}}/wallets
+Content-Type: application/json
+
+{
+  "playerId": "{{$guid}}",
+  "initialBalance": { "amount": "1000.00", "currency": "BRL" }
 }
-bet tx-1 BET 25.00        # 200 PROCESSED, balance 975.00, idempotentReplay false
-bet tx-1 BET 25.00        # 200, idempotentReplay true: o resultado salvo, sem debitar de novo
-bet tx-1 BET 99.00        # 409 IDEMPOTENCY_KEY_REUSED: mesma chave, conteúdo diferente
-bet tx-2 BET 5000.00      # 422 REJECTED, failureCode INSUFFICIENT_FUNDS
 ```
+
+Resposta `201`:
+
+```json
+{ "id": "01a11db2-aafa-719c-be24-fa72b00a2942", "playerId": "c98eb202-f3c4-4ca2-9e9f-dd734365213e",
+  "balance": { "amount": "1000.00", "currency": "BRL" }, "version": 1 }
+```
+
+Para não copiar os IDs à mão, cole na aba **Scripts → Post-response** deste request:
+
+```js
+const body = pm.response.json();
+pm.environment.set("walletId", body.id);
+pm.environment.set("playerId", body.playerId);
+```
+
+Abrir de novo uma carteira para o mesmo `playerId` e moeda devolve `409 WALLET_ALREADY_EXISTS`. Saldo inicial `"0.00"` cria a carteira sem lançamento no extrato.
+
+### 2. Enviar uma aposta (pasta Provedor A)
+
+```http
+POST {{baseUrl}}/wagering/transactions
+Content-Type: application/json
+Idempotency-Key: provider-a:tx-1
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "tx-1",
+  "playerId": "{{playerId}}",
+  "walletId": "{{walletId}}",
+  "roundId": "round-1",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": { "amount": "25.00", "currency": "BRL" }
+}
+```
+
+O cabeçalho `Idempotency-Key` é obrigatório, e o `providerId` do corpo precisa ser o mesmo do token (senão, `403`). Variando este mesmo request dá para ver as garantias principais:
+
+| O que mudar | Resposta |
+|---|---|
+| Nada (primeiro envio) | `200`, `status: PROCESSED`, `balance: 975.00`, `idempotentReplay: false` |
+| Nada (reenviar igual) | `200`, o mesmo resultado com `idempotentReplay: true`; o saldo não muda |
+| Só `money.amount` para `"99.00"` | `409 IDEMPOTENCY_KEY_REUSED`: mesma chave, conteúdo diferente |
+| Chave para `provider-a:tx-1b`, mantendo `externalTransactionId: tx-1` | `409 EXTERNAL_TRANSACTION_ID_CONFLICT`: a mesma operação não pode entrar com outra chave |
+| Novo ID (`tx-2` na chave e no corpo) e `money.amount` `"5000.00"` | `422`, `status: REJECTED`, `failureCode: INSUFFICIENT_FUNDS` |
+| `providerId` para `"provider-b"` | `403`: o corpo não pode falar por outro provedor |
+| `kind` para `"OPENING"` | `400 KIND_NOT_ALLOWED` |
+| `money.amount` para `"25"` ou `25.00` (número) | `400 INVALID_MONEY` |
+| Authorization para **No Auth** | `401 UNAUTHENTICATED` |
+
+Os outros tipos usam o mesmo corpo, com `kind` diferente:
+
+| `kind` | `money.amount` | Observação |
+|---|---|---|
+| `WIN` | maior que zero | Crédito; `referenceExternalTransactionId` é opcional |
+| `LOSS` | exatamente `"0.00"` | Não mexe no saldo |
+| `REFUND` | igual ao da aposta | Crédito; exige `"referenceExternalTransactionId": "<id externo da BET>"` |
+| `ROLLBACK` | igual ao original | Desfaz uma `BET`, `WIN` ou `REFUND`; exige `referenceExternalTransactionId` |
+
+Cada transação aceita uma única reversão com sucesso; a segunda devolve `422` com `REFERENCE_ALREADY_REVERSED`.
+
+### 3. Um estorno que chega antes da aposta (pasta Provedor A)
+
+Envie um `REFUND` que aponta para uma aposta que ainda não existe:
+
+```json
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "r-1",
+  "playerId": "{{playerId}}",
+  "walletId": "{{walletId}}",
+  "roundId": "round-1",
+  "gameId": "fortune-chimp",
+  "kind": "REFUND",
+  "money": { "amount": "10.00", "currency": "BRL" },
+  "referenceExternalTransactionId": "tx-late"
+}
+```
+
+Com `Idempotency-Key: provider-a:r-1`, a resposta é `202` com `status: PENDING_REFERENCE`. Consulte o andamento:
+
+```http
+GET {{baseUrl}}/providers/provider-a/wagering/transactions/r-1
+```
+
+A resposta traz `attempts`, `nextAttemptAt` e `expiresAt`. Agora envie a `BET` `tx-late` de `10.00` (como no passo 2, com `Idempotency-Key: provider-a:tx-late`). Em um ou dois segundos, a consulta acima passa a mostrar `status: PROCESSED`. Se a aposta não chegar em `REFERENCE_TTL` (10 minutos), o estorno vira `REJECTED` com `REFERENCE_NOT_FOUND`.
+
+### 4. Consultar transações (pasta Provedor A)
+
+| Request | Para quê |
+|---|---|
+| `GET {{baseUrl}}/wagering/transactions/<transactionId>` | Pelo ID interno devolvido no envio |
+| `GET {{baseUrl}}/providers/provider-a/wagering/transactions/tx-1` | Pelo ID externo |
+
+Um provedor só enxerga as próprias transações. Com um token do `provider-b`, a primeira consulta devolve `404`, e a segunda (trocando o caminho para `provider-a`) devolve `403`.
+
+### 5. Carteira, extrato e reconciliação (pasta Interno)
+
+| Request | Resposta |
+|---|---|
+| `GET {{baseUrl}}/wallets/{{walletId}}` | Saldo atual e `version` |
+| `GET {{baseUrl}}/wallets/{{walletId}}/ledger?limit=50` | Lançamentos em `items`; se houver mais, use o `nextCursor` em `?cursor=...` |
+| `POST {{baseUrl}}/wallets/{{walletId}}/reconciliation` (sem corpo) | `storedBalance`, `calculatedBalance`, `difference`, `consistent: true` e `checkedEntries` |
+
+### 6. Saúde e métricas (sem autenticação)
+
+| Request | Resposta |
+|---|---|
+| `GET {{baseUrl}}/health/live` | `200` enquanto o processo responde |
+| `GET {{baseUrl}}/health/ready` | `{"checks":{"postgres":"up","sqs":"up","sqs-inbound":"up"},"status":"UP"}` |
+| `GET {{baseUrl}}/metrics` | Métricas no formato Prometheus |
+
+Cada réplica expõe só o que ela mesma tratou. A lista de métricas está em [ARCHITECTURE.md](ARCHITECTURE.md#observabilidade).
+
+### Códigos de resposta
 
 | Situação | HTTP | `status` / `code` |
 |---|---|---|
@@ -167,50 +356,30 @@ bet tx-2 BET 5000.00      # 422 REJECTED, failureCode INSUFFICIENT_FUNDS
 | Entrada inválida | `400` | `INVALID_REQUEST`, `INVALID_MONEY`, `VALIDATION_ERROR`, `MISSING_IDEMPOTENCY_KEY`, `KIND_NOT_ALLOWED` |
 | Carteira inexistente ou de outro jogador | `422` | `WALLET_NOT_FOUND`, `PLAYER_WALLET_MISMATCH` |
 | Chave ou ID externo reutilizados com outro conteúdo | `409` | `IDEMPOTENCY_KEY_REUSED`, `EXTERNAL_TRANSACTION_ID_CONFLICT` |
-| Sem token / token inválido ou vencido | `401` | `UNAUTHENTICATED` |
+| Sem token, token inválido ou vencido | `401` | `UNAUTHENTICATED` |
 | Sem o papel exigido | `403` | `FORBIDDEN` |
 | Indisponibilidade temporária (banco) | `503` | `TEMPORARILY_UNAVAILABLE` |
 
-A lista completa de códigos está no §8 do ARCHITECTURE.md.
+A lista completa de `failureCode` está em [ARCHITECTURE.md](ARCHITECTURE.md#códigos-de-falha).
 
-**3. Um estorno que chega antes da aposta** (fica pendente e se resolve sozinho):
+### Pela fila SQS (terminal)
 
-```sh
-bet r-1 REFUND 10.00 tx-late    # 202 PENDING_REFERENCE
-curl -s localhost:8081/providers/provider-a/wagering/transactions/r-1 -H "Authorization: Bearer $PROVIDER"
-#   "status":"PENDING_REFERENCE", "attempts":N, "nextAttemptAt":…, "expiresAt":…
-bet tx-late BET 10.00           # 200: a chegada da aposta acorda o estorno
-sleep 2
-curl -s localhost:8081/providers/provider-a/wagering/transactions/r-1 -H "Authorization: Bearer $PROVIDER"
-#   "status":"PROCESSED"
-```
-
-Se a referência nunca chegar em `REFERENCE_TTL`, o estorno vira `REJECTED` com `REFERENCE_NOT_FOUND`.
-
-**4. Consultar carteira, extrato e reconciliação** (só o serviço interno):
+O Postman não fala com o SQS, então estes exemplos usam o `awslocal` de dentro do contêiner do LocalStack. Defina `WALLET` e `PLAYER` com os valores do passo 1:
 
 ```sh
-curl -s localhost:8081/wallets/$WALLET -H "Authorization: Bearer $ADMIN"
-curl -s "localhost:8081/wallets/$WALLET/ledger?limit=50" -H "Authorization: Bearer $ADMIN"   # cursor opaco em "nextCursor"
-curl -s -X POST localhost:8081/wallets/$WALLET/reconciliation -H "Authorization: Bearer $ADMIN"
-# {"walletId":…,"storedBalance":…,"calculatedBalance":…,"difference":{"amount":"0.00",…},"consistent":true,"checkedEntries":N}
-```
-
-**5. Enviar uma operação pela fila** (o grupo da mensagem é a carteira; o `SenderId` que o LocalStack informa é mapeado para o `provider-a`):
-
-```sh
+WALLET=<walletId>; PLAYER=<playerId>
 Q=$(docker compose exec -T localstack awslocal sqs get-queue-url --queue-name wager-transactions.fifo --query QueueUrl --output text | tr -d '\r')
 docker compose exec -T localstack awslocal sqs send-message --queue-url "$Q" \
   --message-group-id "$WALLET" --message-deduplication-id "msg-1-$(date +%s)" --message-body "{
   \"messageId\":\"msg-1\",\"type\":\"WagerTransactionRequested\",\"occurredAt\":\"2026-09-08T12:00:00.000Z\",
   \"data\":{\"providerId\":\"provider-a\",\"externalTransactionId\":\"sqs-1\",\"idempotencyKey\":\"provider-a:sqs-1\",
-  \"playerId\":\"$PLAYER\",\"walletId\":\"$WALLET\",\"roundId\":\"round-1\",\"gameId\":\"game-1\",\"kind\":\"BET\",
+  \"playerId\":\"$PLAYER\",\"walletId\":\"$WALLET\",\"roundId\":\"round-1\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",
   \"money\":{\"amount\":\"5.00\",\"currency\":\"BRL\"}}}"
-sleep 2
-curl -s localhost:8081/providers/provider-a/wagering/transactions/sqs-1 -H "Authorization: Bearer $PROVIDER"   # PROCESSED
 ```
 
-A mesma operação enviada por HTTP e por SQS é a mesma: repetir uma depois da outra devolve o resultado salvo. Mensagens que não têm como dar certo (JSON inválido, remetente que não é o provedor do corpo, `kind: OPENING`, mesma `messageId` com outro conteúdo…) vão direto para a DLQ, com o motivo no atributo `failureCode`:
+Depois, no Postman, `GET {{baseUrl}}/providers/provider-a/wagering/transactions/sqs-1` mostra `PROCESSED`. O `MessageGroupId` é a carteira, e o `SenderId` informado pelo LocalStack é mapeado para o `provider-a`. Enviar a mesma operação por HTTP e por SQS gera um único débito: a segunda chegada devolve o resultado salvo.
+
+Mensagens que não têm como dar certo (JSON inválido, remetente que não é o provedor do corpo, `kind: OPENING`, mesmo `messageId` com outro conteúdo) vão direto para a DLQ, com o motivo no atributo `failureCode`:
 
 ```sh
 docker compose exec -T localstack awslocal sqs send-message --queue-url "$Q" \
@@ -220,24 +389,14 @@ docker compose exec -T localstack awslocal sqs receive-message --queue-url "$D" 
 #   "failureCode": "MALFORMED_MESSAGE"
 ```
 
-**6. Eventos de saída** (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WalletBalanceChanged`, `WagerTransactionPendingReference`), na fila `wallet-events.fifo`, com `MessageGroupId` = carteira e `MessageDeduplicationId` = `eventId`:
+Os eventos de saída (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WalletBalanceChanged`, `WagerTransactionPendingReference`) ficam na fila `wallet-events.fifo`, com `MessageGroupId` igual à carteira e `MessageDeduplicationId` igual ao `eventId`:
 
 ```sh
 E=$(docker compose exec -T localstack awslocal sqs get-queue-url --queue-name wallet-events.fifo --query QueueUrl --output text | tr -d '\r')
 docker compose exec -T localstack awslocal sqs receive-message --queue-url "$E" --max-number-of-messages 3 --attribute-names MessageGroupId --message-attribute-names All
 ```
 
-O corpo é exatamente o JSON gravado na outbox na transação da operação.
-
-**7. Saúde e métricas** (públicos):
-
-```sh
-curl -s localhost:8081/health/live
-curl -s localhost:8081/health/ready
-curl -s localhost:8081/metrics | grep -E '^(wager_|outbox_|pending_reference|sqs_|wallet_)' | grep -v _bucket
-```
-
-Cada réplica expõe só o que ela mesma tratou; some as três para o total. As métricas estão listadas no §11 do ARCHITECTURE.md. Os logs saem em JSON, com `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`, e nunca com valores monetários em `INFO`.
+O corpo de cada mensagem é exatamente o JSON gravado na outbox, na mesma transação da operação.
 
 ## Tracing (OpenTelemetry)
 
@@ -249,15 +408,35 @@ make up-tracing        # o mesmo que `make up`, mais um Jaeger, com as 3 réplic
 
 Faça algumas chamadas (por exemplo, a aposta do exemplo 2) e abra <http://localhost:16686>, serviço `wallet-service`. Uma aposta por HTTP aparece como `POST /wagering/transactions` → `wager.execute` → `db.transaction`; por SQS, como `sqs.process` → `wager.execute` → `db.transaction`; a publicação dos eventos é `outbox.publish` e a retomada de uma pendência, `pending_reference.resolve`.
 
-A trilha continua a do chamador: mande um cabeçalho `traceparent` no HTTP, ou o atributo de mensagem `traceparent` no SQS, e os spans entram nessa trilha (o `traceId` também aparece no log `wager transaction handled`).
+
+## Métricas e logs: Prometheus, Loki e Grafana
+
+Opcional, para acompanhar o serviço rodando. Sobe junto com o Jaeger (os logs com `traceId` linkam para a trilha):
 
 ```sh
-curl -s -X POST localhost:8081/wagering/transactions -H "Authorization: Bearer $PROVIDER" -H "Idempotency-Key: provider-a:t-1" \
-  -H 'Content-Type: application/json' -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' -d '{…}'
-# Jaeger: http://localhost:16686/trace/4bf92f3577b34da6a3ce929d0e0e4736
+make up-observability      # o mesmo que `make up`, mais Jaeger, Prometheus, Loki, Alloy e Grafana
 ```
 
-Para usar outro coletor, defina `OTEL_EXPORTER_OTLP_ENDPOINT` (por exemplo `http://meu-coletor:4318`) para o serviço; `OTEL_TRACES_SAMPLER=parentbased_traceidratio` com `OTEL_TRACES_SAMPLER_ARG=0.1` amostra 10%. Os spans não levam valores monetários, tokens nem corpos de requisição. Voltar ao normal: `make up` (ou `make down` para parar tudo, Jaeger incluído).
+| O quê | Onde | Para quê |
+|---|---|---|
+| **Grafana** | <http://localhost:3000> (`admin` / `admin`; sem login só dá para ver) | Dashboard e consulta de logs |
+| Prometheus | <http://localhost:9090> | `/targets` (as 3 réplicas), `/alerts` (as regras), consultas PromQL |
+| Loki | <http://localhost:3100> | Armazena os logs (use pelo Grafana) |
+| Alloy | <http://localhost:12345> | Coletor que lê os logs dos contêineres e os manda ao Loki |
+| Jaeger | <http://localhost:16686> | Trilhas |
+
+**Dashboard.** No Grafana: *Dashboards* → pasta **Wallet service** → **Wallet service**. Já vem carregado (nada a importar) e se atualiza a cada 10 s. Tem as linhas:
+- **Visão geral:** operações por segundo, réplicas no ar, carteiras divergentes, referências pendentes, atraso da outbox, mensagens na DLQ.
+- **Operações:** por resultado, rejeições por código, erros por classe, por canal e tipo, replays e conflitos de idempotência.
+- **Latência e banco:** p50/p95/p99 do processamento, espera pelo lock da carteira, retentativas do banco por SQLSTATE, goroutines e memória por réplica.
+- **Mensageria:** mensagens de entrada por desfecho, publicação da outbox, backlog da outbox, pendências de referência.
+- **Logs:** avisos e erros de todas as réplicas, uma busca livre (a caixa **Search logs** no alto: cole um `correlationId`, `transactionId`, `walletId` ou `messageId`) e as linhas por nível.
+
+Uma linha com `traceId` mostra o botão **Open trace**, que abre a trilha no Jaeger (o `X-Correlation-Id` da resposta HTTP é o `correlationId`).
+
+**Alertas.** O Prometheus avalia 7 regras (`deploy/observability/prometheus/alerts.yml`): saldo divergente do ledger, réplica fora do ar, outbox atrasada, mensagens na DLQ, fila de entrada ilegível, banco pedindo retentativas e falhas do próprio serviço. Elas aparecem em <http://localhost:9090/alerts>; **não há Alertmanager**, então nada é notificado.
+
+Os dados ficam em volumes do Docker (sobrevivem a `make down`); `docker compose down -v` apaga tudo, banco incluído. É um ambiente de desenvolvimento: o Grafana aceita visitantes sem login e o Alloy monta o socket do Docker (somente leitura).
 
 ## Testes
 
@@ -277,8 +456,6 @@ Os testes de **integração** e de **recuperação** usam o Postgres, o Keycloak
 
 Os valores padrão do `Makefile` supõem o Postgres na `localhost:5432` com a senha `postgres`; para outro endereço: `make test-integration TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable`. Sem as variáveis `TEST_*`, os testes de integração **se pulam** em vez de falhar.
 
-A injeção de falhas (`pkg/faultinject`) só existe nos binários compilados com a tag `faultinject`; o binário normal não contém esse código (um teste confere).
-
 ## Estrutura do código
 
 ```
@@ -290,14 +467,6 @@ internal/adapter/          httpapi (HTTP) e sqsmsg (envelope SQS → o mesmo com
 internal/infra/           postgres, sqs, oidc, outbox, refworker, observability, telemetry, migrations
 internal/app/              módulos Fx: o único lugar que conhece o Fx
 pkg/                       utilitários genéricos: canonicaljson, backoff, uuid, faultinject
-deploy/                    realm do Keycloak, script de filas e políticas do LocalStack, papéis do banco
+deploy/                    realm do Keycloak, script de filas e políticas do LocalStack, papéis do banco, observability/ (Prometheus, Loki, Alloy, Grafana)
 test/recovery/             a suíte de falhas com processos reais
 ```
-
-## Problemas comuns
-
-- **A porta 5432 já está em uso** (outro Postgres no host): `POSTGRES_PORT=5433 docker compose up --build -d` e `make test-integration TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable`.
-- **`migrate` falha com `permission denied for table goose_db_version`**: o volume do Postgres vem de uma versão antiga, anterior aos papéis `wallet_owner`/`wallet_app`. Recomece com `docker compose down -v`.
-- **Só um provedor consegue enviar por SQS no ambiente local**: o LocalStack informa o mesmo `SenderId` (`000000000000`) para qualquer remetente, e o Compose o mapeia para `provider-a`. Na AWS real cada provedor teria o próprio principal do IAM. Detalhes e a consequência para o isolamento estão no ARCHITECTURE.md (§7.4 e §14).
-- **Uma mensagem enviada logo depois de parar um consumidor demora até 30 s**: o *long poll* abandonado ainda pode "receber" a mensagem no servidor, que fica invisível até o fim da visibilidade. É um atraso, não uma perda.
-- **O Keycloak demora no primeiro boot**: as réplicas só sobem depois que ele fica saudável; `docker compose ps` mostra o estado.
