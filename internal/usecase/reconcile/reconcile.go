@@ -27,7 +27,6 @@ type Report struct {
 	WalletID   wallet.WalletID
 	Stored     money.Money
 	Calculated money.Money
-	// Difference is stored minus calculated, so it is negative when the ledger holds more than the wallet.
 	Difference     money.Money
 	Consistent     bool
 	CheckedEntries int64
