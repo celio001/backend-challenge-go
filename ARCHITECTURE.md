@@ -23,6 +23,8 @@ Um único serviço Go, organizado em camadas (Clean/Hexagonal Architecture) e mo
 
 Cada réplica recebe operações por HTTP e pela fila `wager-transactions.fifo`, e roda três workers: o consumidor SQS, o publicador da outbox e o resolvedor de referências pendentes. HTTP e SQS montam o mesmo comando e chamam o mesmo caso de uso, então as garantias são idênticas nos dois canais.
 
+## Tabelas e relacionamentos do banco de dados
+
 ![Tabelas e relacionamentos do banco de dados](docs/tables.png)
 
 **Se uma réplica morrer:**
