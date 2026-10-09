@@ -4,6 +4,8 @@ Curti o desafio do challenge, eu utilizei ele para bricar com algumas coisas, ne
 
 O que não consegui resolver com a stdlib puxei externo, logico isso sem contar o que era obrigatorio.
 
+Não fiz a parte do Swagger, sorry kkkkk. Mas já documentei tudo no [README.md](README.md). Tinha pensado em colocar o Kong Gateway para receber as requisições, fazer o balanceamento entre os três serviços e também evitar de bater diretamente no Keycloak pra gerar os tokens, centralizando tudo num lugar só. No entanto, acebei não tendo tempo, mas fica aqui como uma melhoria futura que eu adicionaria no projeto kkkkk.
+
 Instruções de execução estão no [README.md](README.md).
 
 ## Uso de IA no desenvolvimento
